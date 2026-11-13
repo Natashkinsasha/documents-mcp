@@ -1,15 +1,17 @@
 import { randomBytes } from 'node:crypto';
-import { access, chmod, chown, copyFile, mkdir, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { access, chmod, chown, copyFile, mkdir, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import path from 'node:path';
-import { createInterface } from 'node:readline/promises';
-import { Writable } from 'node:stream';
 import { setTimeout as delay } from 'node:timers/promises';
 import { isSea } from 'node:sea';
 import { defaultPaths, loadConfig, normalizePublicUrl, readConfigFile, serializeConfig } from './config.js';
 import { execute, requireAdministrator, restrictWindows, serviceAction, systemdUnit, writeSystemdUnit, windowsTask, type InstallPaths } from './service.js';
+import { connectionOptions, type ConnectionOptions } from './connection.js';
+import { claimCue } from './cue.js';
+import { terminalIO, type TerminalIO } from './terminal.js';
+import { VERSION } from './version.js';
 
-export interface InstallOptions { docs?: string; tunnelToken?: string; publicUrl?: string; port?: string; user?: string; yes?: boolean }
+export interface InstallOptions extends ConnectionOptions { docs?: string; user?: string }
 export function documentAclFix(user: string, docs: string, readOnly = false): string {
   const permission = readOnly ? 'rX' : 'rwX';
   const quoted = `'${docs.replaceAll("'", "'\\''")}'`;
@@ -25,47 +27,60 @@ export function upgradeSettings(previous: NodeJS.ProcessEnv, options: InstallOpt
   settings.MCP_TOKEN ||= randomBytes(32).toString('hex');
   settings.INDEX_DIR = paths.data;
   settings.HOST = '127.0.0.1';
+  settings.INSTALLED_VERSION = VERSION;
   if (process.env.READ_ONLY !== undefined) settings.READ_ONLY = process.env.READ_ONLY;
   return settings;
-}
-
-async function ask(question: string, secret = false): Promise<string> {
-  let muted = false;
-  const output = new Writable({ write(chunk, _encoding, callback) { if (!muted) process.stdout.write(chunk); callback(); } });
-  const terminal = createInterface({ input: process.stdin, output, terminal: Boolean(process.stdin.isTTY) });
-  try {
-    if (secret && process.stdin.isTTY) { process.stdout.write(question); muted = true; return await terminal.question(''); }
-    return await terminal.question(question);
-  } finally { terminal.close(); if (muted) process.stdout.write('\n'); }
 }
 
 export async function waitForHealth(url: string, timeoutMs = 60_000): Promise<boolean> {
   const end = Date.now() + timeoutMs;
   do {
-    try { const response = await fetch(url, { signal: AbortSignal.timeout(Math.min(3000, Math.max(1, end - Date.now()))), redirect: 'error' }); await response.body?.cancel(); if (response.ok) return true; } catch {}
+    try { const response = await fetch(url, { signal: AbortSignal.timeout(Math.min(3000, Math.max(1, end - Date.now()))), redirect: 'error' }); if (response.ok && (await response.text()).trim() === 'ok') return true; await response.body?.cancel(); } catch {}
     await delay(Math.min(500, Math.max(0, end - Date.now())));
   } while (Date.now() < end);
   return false;
 }
 
-export function printConnection(settings: NodeJS.ProcessEnv): void {
+export function printConnection(settings: NodeJS.ProcessEnv, print: TerminalIO['print'] = terminalIO.print): void {
   const url = settings.PUBLIC_URL ? `${settings.PUBLIC_URL}/mcp` : `http://127.0.0.1:${settings.PORT ?? '3000'}/mcp`;
-  console.log(`URL: ${url}\nЗаголовок: Authorization: Bearer ${settings.MCP_TOKEN}`);
-  if (!settings.PUBLIC_URL) console.log('Публичный URL не задан. Без туннеля доступ только с этого сервера.');
+  print(`Адрес: ${settings.PUBLIC_URL || `http://127.0.0.1:${settings.PORT ?? '3000'}`}\nURL: ${url}\nКлюч для Cue: ${settings.MCP_TOKEN ?? 'не задан'}\nЗаголовок: Authorization: Bearer ${settings.MCP_TOKEN ?? 'не задан'}`);
+  print('Вставьте этот ключ в Cue: Коннекторы → Документы компании → Ключ из программы → Проверить и подключить');
+  if (!settings.PUBLIC_URL) print('Публичный URL не задан. Без туннеля доступ только с этого компьютера.');
 }
 
-export async function install(options: InstallOptions): Promise<void> {
-  await requireAdministrator();
-  if (!['linux', 'win32'].includes(process.platform)) throw new Error('Служба поддерживается в Linux с systemd и Windows. Для macOS используйте run.');
-  if (!isSea()) throw new Error('Установку выполняет единый исполняемый файл documents-mcp, а не исходный код под Node.js.');
-  const paths = defaultPaths();
-  const previous = await readConfigFile(paths.config, true);
+export interface InstallDependencies {
+  platform: NodeJS.Platform; sea: boolean; paths: InstallPaths; io: TerminalIO;
+  administrator: typeof requireAdministrator; readSettings: typeof readConfigFile;
+  claim: typeof claimCue; health: typeof waitForHealth;
+  deploy: typeof deployInstallation;
+}
+
+export async function install(input: InstallOptions, overrides: Partial<InstallDependencies> = {}): Promise<NodeJS.ProcessEnv> {
+  const dependencies: InstallDependencies = { platform: process.platform, sea: isSea(), paths: defaultPaths(), io: terminalIO, administrator: requireAdministrator, readSettings: readConfigFile, claim: claimCue, health: waitForHealth, deploy: deployInstallation, ...overrides };
+  await dependencies.administrator();
+  if (!['linux', 'win32'].includes(dependencies.platform)) throw new Error('Служба поддерживается в Linux с systemd и Windows. Для macOS используйте run.');
+  if (!dependencies.sea) throw new Error('Установку выполняет единый исполняемый файл documents-mcp, а не исходный код под Node.js.');
+  const paths = dependencies.paths;
+  const previous = await dependencies.readSettings(paths.config, true);
+  const options: InstallOptions = { ...input, ...await connectionOptions(previous, input, dependencies.io, dependencies.claim) };
+  delete options.cueCode; delete options.cueAddress;
   if (!options.yes) {
-    options.docs ??= await ask(`Папка документов${previous.DOCS_ROOT ? ` [${previous.DOCS_ROOT}]` : ''}: `) || previous.DOCS_ROOT;
-    options.tunnelToken ??= await ask(`Токен Cloudflare Tunnel (${previous.TUNNEL_TOKEN ? 'Enter — сохранить' : 'Enter — только локально'}): `, true) || previous.TUNNEL_TOKEN || '';
-    options.publicUrl ??= await ask(`Публичный HTTPS-адрес${previous.PUBLIC_URL ? ` [${previous.PUBLIC_URL}]` : ' (необязательно)'}: `) || previous.PUBLIC_URL || '';
+    options.docs ??= await dependencies.io.ask(`Папка документов${previous.DOCS_ROOT ? ` [${previous.DOCS_ROOT}]` : ''}: `) || previous.DOCS_ROOT;
   }
   const settings = upgradeSettings(previous, options, paths);
+  await dependencies.deploy(settings, options, previous, paths);
+  if (!await dependencies.health(`http://127.0.0.1:${settings.PORT}/healthz`)) throw new Error('Служба установлена, но не ответила за 60 секунд. Проверьте status и журнал службы.');
+  if (settings.PUBLIC_URL) {
+    dependencies.io.print('Проверяем публичный адрес (до 60 секунд)…');
+    if (await dependencies.health(`${settings.PUBLIC_URL}/healthz`)) dependencies.io.print('Туннель работает: публичный адрес ответил ok.');
+    else dependencies.io.print('Предупреждение: публичный адрес пока не отвечает ok. Проверьте DNS и маршрут туннеля; служба работает локально.');
+  }
+  dependencies.io.print('Служба установлена и запущена.');
+  printConnection(settings, dependencies.io.print);
+  return settings;
+}
+
+async function deployInstallation(settings: NodeJS.ProcessEnv, options: InstallOptions, previous: NodeJS.ProcessEnv, paths: InstallPaths): Promise<void> {
   if (!settings.DOCS_ROOT || !path.isAbsolute(settings.DOCS_ROOT)) throw new Error('Укажите существующую абсолютную папку: --docs <путь>.');
   const docs = await realpath(settings.DOCS_ROOT);
   if (!(await stat(docs)).isDirectory()) throw new Error('Указанный путь не является папкой.');
@@ -97,10 +112,12 @@ export async function install(options: InstallOptions): Promise<void> {
   await mkdir(path.dirname(paths.binary), { recursive: true });
   if (process.platform === 'win32') { await restrictWindows(paths.data); await restrictWindows(path.dirname(paths.binary)); }
   await serviceAction('stop', paths).catch(() => {});
-  const stagedBinary = `${paths.binary}.new`;
-  await copyFile(process.execPath, stagedBinary); await chmod(stagedBinary, 0o755);
-  if (process.platform === 'win32') await rm(paths.binary, { force: true });
-  await rename(stagedBinary, paths.binary);
+  if (path.resolve(process.execPath) !== path.resolve(paths.binary)) {
+    const stagedBinary = `${paths.binary}.new`;
+    await copyFile(process.execPath, stagedBinary); await chmod(stagedBinary, 0o755);
+    if (process.platform === 'win32') await rm(paths.binary, { force: true });
+    await rename(stagedBinary, paths.binary);
+  }
   const stagedConfig = `${paths.config}.new`;
   await writeFile(stagedConfig, serializeConfig(settings), { mode: 0o600 });
   if (identity) { await chown(path.dirname(paths.config), 0, identity.gid); await chmod(path.dirname(paths.config), 0o750); await chown(stagedConfig, identity.uid, identity.gid); }
@@ -114,10 +131,6 @@ export async function install(options: InstallOptions): Promise<void> {
     await execute('schtasks.exe', ['/Create', '/TN', 'documents-mcp', '/XML', paths.service, '/F'], { windowsHide: true });
   }
   await serviceAction('start', paths);
-  if (!await waitForHealth(`http://127.0.0.1:${settings.PORT}/healthz`)) throw new Error('Служба установлена, но не ответила за 60 секунд. Проверьте status и журнал службы.');
-  if (settings.PUBLIC_URL && !await waitForHealth(`${settings.PUBLIC_URL}/healthz`)) console.log('Публичный адрес пока не отвечает. Проверьте DNS и маршрут туннеля; служба работает локально.');
-  console.log('Служба установлена и запущена. Настройки MCP-клиента:');
-  printConnection(settings);
 }
 
 export async function uninstall(purge: boolean): Promise<void> {
