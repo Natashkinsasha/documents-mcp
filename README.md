@@ -2,6 +2,23 @@
 
 A read/write MCP server over an existing document folder. **One executable, one installation command.** No Node.js, Docker, Tesseract, Poppler or separate cloudflared installation is needed on the destination server. The executable includes Node, SQLite FTS5, PDF extraction, multilingual WASM OCR and Cloudflare Tunnel. All application UI, tools and errors are in Russian. Writing is enabled by default; optional `READ_ONLY=1` hides all seven write/trash tools.
 
+## Install: Windows (download and double-click)
+
+1. Download `documents-mcp-win-x64.exe` and verify its SHA-256 against `SHA256SUMS`.
+2. Double-click the executable. It is **unsigned**. If SmartScreen says **«Windows защитил ваш компьютер»**, use **«Подробнее» → «Выполнить в любом случае»** only if you trust the download and your organization's policy permits it.
+3. Accept the UAC administrator request. If declined, the program explains that administrator rights are required and waits for Enter.
+4. Choose a **local documents folder** in the Windows folder picker (or type its path if the picker is unavailable).
+5. Select **«Адрес и код из Cue (рекомендуется)»**, then enter the address (for example `vs.cuechat.org`) and one-time code issued in Cue. The code is valid for **24 hours**; its input is hidden and it is never saved.
+6. After installation, the program prints the address and **«Ключ для Cue: …»** and copies the key to the clipboard. In Cue, open **Коннекторы → Документы компании → Ключ из программы → Проверить и подключить** and paste this key. Wait for the public health check; if the tunnel is still starting, the program shows a warning rather than failing the installation.
+
+Open the downloaded executable again to see the installed version versus this file, task state, documents folder and address. The wizard offers **update**, **show/copy address and key**, **change folder**, **reconnect with a new Cue address/code**, and **uninstall**. Updates, folder changes and reconnects keep the existing MCP key. Uninstall keeps settings and index unless you separately confirm their deletion; source documents are never deleted. The window waits for **«Нажмите Enter, чтобы закрыть окно»**, including on errors.
+
+The program installs under `%ProgramFiles%\documents-mcp`, with config and data under `%ProgramData%\documents-mcp`. ACLs restrict these locations to **SYSTEM and Administrators**. It registers a native Task Scheduler task named `documents-mcp`: a boot trigger, SYSTEM identity, no logged-in user required, no execution time limit, and restart-on-failure every minute (up to 999 consecutive retries). The task always uses `run --config …`, never the wizard.
+
+Only **local document folders** are supported. SYSTEM normally has access to local folders, but restricted ACLs still apply. UNC paths and `--user` are rejected; synchronize network documents locally or arrange a domain-account task with your administrator.
+
+For terminal or unattended use, open PowerShell **as Administrator** and run `.\documents-mcp-win-x64.exe install` with the same flags as Linux below. Double-click detection applies only to Windows, with no arguments and an interactive console. On Linux/macOS no arguments still means `run`. macOS supports `run`, `status`, help and version for local use/testing, not service installation.
+
 ## Install: Linux
 
 Download the executable for the server architecture (`documents-mcp-linux-x64` or `documents-mcp-linux-arm64`), verify it against the accompanying `SHA256SUMS`, and give it execute permission. You may rename it to `documents-mcp`.
@@ -11,7 +28,18 @@ chmod +x documents-mcp
 sudo ./documents-mcp install
 ```
 
-The **installation command** asks for the existing documents folder, an optional Cloudflare tunnel token (input is hidden), and an optional public HTTPS hostname. It generates a new 256-bit bearer token, installs and starts a systemd service, checks local health, optionally checks public health for up to 60 seconds, and prints the MCP URL and authorization header. Failure of the public check is a warning: DNS or the tunnel route may not be ready yet. Installation requires root and a Linux host running systemd.
+The **installation command** first asks **«Как подключить к Cue?»**: **1 — «Адрес и код из Cue (рекомендуется)»**, **2 — «Свой туннель Cloudflare (токен)»**, **3 — «Только на этом компьютере»**. For option 1 enter the address and one-time code from Cue, then the existing documents folder. Addresses may also include `https://` or a trailing `/mcp`. It generates a new 256-bit MCP key, installs and starts a systemd service, checks local health, and checks public `/healthz` for the exact `ok` response for up to 60 seconds. Only then does it say the tunnel works; failure of the public check is a warning. It prints the address, key and the Cue paste instruction shown above. Installation requires root and a Linux host running systemd.
+
+Unattended setup (prefer interactive hidden input to avoid storing the code in shell history):
+
+```sh
+sudo ./documents-mcp install --yes --docs /srv/company/documents \
+  --cue-address vs.cuechat.org --cue-code XXXX-XXXX-XXXX
+```
+
+Cue activation calls `POST https://app.cuechat.org/api/document-servers/claim` with Russian errors and a 30-second request timeout. A `503` is retried every 10 seconds for up to two minutes; other errors are shown immediately, including rate-limit retry instructions. Repeating redemption returns the same tunnel settings until the code expires or the connector is activated. Cue chooses the port; `--port` cannot override it. The code is never stored or logged; only the protected config stores the tunnel token, which is never printed or put on a child process command line. `CUE_URL` changes **only** the claim endpoint, requires HTTPS, and permits HTTP solely for `localhost`/`127.0.0.1` tests. It is not a public URL or a runtime server setting.
+
+On upgrade, Enter keeps the current connection; `--yes` keeps it without asking. Choose a new connection method or pass new Cue flags to reconnect, keeping the MCP key. Choosing option 3 clears the previous tunnel and public address. A first unattended install without connection flags is local-only. Existing `--tunnel-token` / `--public-url` flags remain available for a manually managed tunnel.
 
 Paths:
 
@@ -40,23 +68,7 @@ sudo ./documents-mcp install --user document-editor
 
 The application does not install ACL utilities or modify document permissions automatically. Permission to read/write the folder itself does not guarantee permission to every child; unreadable children cannot be indexed and protected descendants cannot be changed.
 
-## Install: Windows
-
-Download `documents-mcp-win-x64.exe`, verify its SHA-256, optionally rename it to `documents-mcp.exe`, open PowerShell **as Administrator**, and run:
-
-```powershell
-.\documents-mcp.exe install
-```
-
-The executable is **unsigned**; SmartScreen or organizational application-control policy may require explicit approval. Do not bypass your organization's security policy.
-
-The program installs under `%ProgramFiles%\documents-mcp`, with config and data under `%ProgramData%\documents-mcp`. ACLs restrict these locations to **SYSTEM and Administrators**. It registers a native Task Scheduler task named `documents-mcp`: a boot trigger, SYSTEM identity, no logged-in user required, no execution time limit, and restart-on-failure every minute (up to 999 consecutive retries). This deliberately uses the built-in scheduler instead of shipping a separate service wrapper: a Node SEA does not implement the Windows Service Control Manager protocol. `status` shows the task state.
-
-The Windows installer supports **local document folders only**. SYSTEM already normally has write access to local folders; restricted document ACLs still apply. SYSTEM cannot generally read a network share using your interactive credentials. UNC paths and `--user` on Windows are rejected with an explanation. For network documents, copy/synchronize them into a local folder or arrange a separate domain-account task with your administrator; that account configuration is not automated here.
-
-macOS ARM64 binaries support `run`, `status`, help and version for local use/testing. The installer intentionally supports Linux/systemd and Windows, not launchd.
-
-## Create the Cloudflare Tunnel
+## Alternative: create your own Cloudflare Tunnel
 
 1. In your Cloudflare account, add a domain you control. Open **Zero Trust → Networks → Connectors / Tunnels** and create a **remotely managed Cloudflare Tunnel**. Dashboard labels may change.
 2. Copy only its tunnel token, not the entire suggested Docker/shell command. Enter that token during `install`. You do not install Cloudflare's command-line program separately.
@@ -65,7 +77,7 @@ macOS ARM64 binaries support `run`, `status`, help and version for local use/tes
 
 The embedded supervisor starts `cloudflared tunnel --no-autoupdate run`. The tunnel token is passed in the child's **`TUNNEL_TOKEN` environment variable**, never its arguments. The child does not receive `MCP_TOKEN`. Output lines are prefixed `[tunnel]`, the exact tunnel token is redacted, and failed children restart with exponential backoff from 1 to 30 seconds. Shutdown stops the child. With a tunnel, the HTTP server always binds **`127.0.0.1`**, even if `HOST` says otherwise. No inbound firewall port needs to be opened.
 
-Without a tunnel, installation is local-only by default. Cloudflare Access login pages are not MCP bearer authentication; if you put an additional Access policy in front, the client must be able to satisfy it. Configure WAF/rate limiting as appropriate. No account, hostname or live tunnel is created by this repository.
+Without a tunnel, installation is local-only by default. Cloudflare Access login pages are not MCP bearer authentication; if you put an additional Access policy in front, the client must be able to satisfy it. Configure WAF/rate limiting as appropriate. Manual mode does not provision a Cloudflare account, hostname or tunnel; the recommended Cue mode obtains an already provisioned installation from Cue.
 
 ## Connect an MCP client
 
@@ -136,7 +148,7 @@ sudo documents-mcp uninstall --purge  # also remove config and data
 
 Use the `.exe` equivalents on Windows. If you might need `--purge`, supply it on the first uninstall: the installed executable is removed. The Windows executable removes itself via a short-lived built-in PowerShell process after exiting. The Linux system user is left in place on uninstall. **Uninstall never deletes source documents or their trash**; document tools can delete into trash and the retention job permanently removes expired trash.
 
-Unattended installation accepts `--docs`, `--tunnel-token`, `--public-url`, `--port`, `--user` (Linux) and `--yes`. The first unattended install requires `--docs`; omitted settings retain their previous values. An explicitly empty `--tunnel-token ""` disables the tunnel. Prefer interactive hidden token input: a token supplied to the **installer flag** can be visible in shell history and the installer's process arguments. It is never copied into cloudflared's arguments or the generated unit/task.
+Unattended installation accepts `--docs`, `--cue-address` with `--cue-code`, the alternative `--tunnel-token` / `--public-url`, `--port`, `--user` (Linux) and `--yes`. The first unattended install requires `--docs`; omitted settings retain their previous values. Cue always sets the port returned by the claim endpoint. Do not mix Cue flags with manual-tunnel flags. An explicitly empty `--tunnel-token ""` disables the tunnel. Prefer interactive hidden secret input: a code/token supplied to the **installer flag** can be visible in shell history and the installer's process arguments. Secrets are never copied into child process arguments or the generated unit/task.
 
 ## Configuration
 
@@ -189,6 +201,8 @@ pnpm build:binary --target linux-x64,linux-arm64
 ```
 
 Alternatively run `node dist/main.js run --config ...` or use environment variables. `pnpm dev` prepares runtime assets and can run without a tunnel before a build. For source-mode tunneling, run `pnpm build` first to populate the pinned host cloudflared cache. `pnpm sample` exercises generated fixtures using the SDK.
+
+`pnpm exec tsx scripts/verify-cue-install.ts` runs a root-free install-flow smoke test on macOS: a local fake Cue HTTP server, a separate client process with `CUE_URL=http://127.0.0.1:<port>`, real claim/configuration/connection output, and fake OS deployment/health checks. Temporary settings are removed afterwards. This does not verify a real Cloudflare tunnel, Windows UAC/picker/clipboard or service installation.
 
 Outputs are `release/documents-mcp-<target>[.exe]` and `release/SHA256SUMS`. Supported targets: `linux-x64`, `linux-arm64`, `win-x64`, `darwin-arm64`. Downloads and temporary build products are under git-ignored `.cache/`; outputs under ignored `release/`.
 

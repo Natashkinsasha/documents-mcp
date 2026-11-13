@@ -23,10 +23,14 @@ export function windowsTask(paths: InstallPaths): string {
 
 export async function requireAdministrator(): Promise<void> {
   if (process.platform === 'win32') {
-    try { await execute('fltmc.exe', [], { windowsHide: true }); return; } catch {}
+    if (await windowsAdministrator()) return;
     throw new Error('Запустите терминал от имени Администратора.');
   }
   if (process.getuid?.() !== 0) throw new Error('Команда требует root. Запустите её через sudo.');
+}
+
+export async function windowsAdministrator(run: typeof execute = execute): Promise<boolean> {
+  try { return /\bS-1-16-(?:12288|16384)\b/u.test((await run('whoami.exe', ['/groups'], { windowsHide: true, timeout: 10_000 })).stdout); } catch { return false; }
 }
 
 export async function restrictWindows(directory: string): Promise<void> {

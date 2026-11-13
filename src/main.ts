@@ -6,12 +6,41 @@ import { install, uninstall, printConnection, type InstallOptions } from './inst
 import { requireAdministrator, serviceAction } from './service.js';
 import { log } from './types.js';
 import { VERSION } from './version.js';
+import { launchWindowsWizard, wizardMode } from './wizard.js';
+import { commandError } from './terminal.js';
 
-const HELP = `documents-mcp — поиск и чтение документов через MCP\n\nКоманды:\n  run                Запустить сервер (команда по умолчанию)\n  install            Установить или обновить службу (root/Администратор)\n  uninstall          Удалить службу; --purge удаляет также настройки и индекс\n  status             Состояние службы и индекса\n  token              Показать URL и токен (root/Администратор)\n  --version          Версия программы\n  --help             Эта справка\n\nНастройки:\n  --config <путь>     Файл настроек; переменные окружения имеют приоритет\n  --docs <путь>       Папка документов для установки\n  --tunnel-token <токен>  Токен Cloudflare (безопаснее вводить интерактивно)\n  --public-url <URL>  Публичный HTTPS-адрес\n  --port <число>      Порт (по умолчанию 3000)\n  --user <имя>        Пользователь службы Linux; Windows использует SYSTEM\n  --yes              Установка без вопросов; --docs обязателен впервые\n`;
+const HELP = `documents-mcp — поиск и чтение документов через MCP
+
+Команды:
+  run                Запустить сервер (команда по умолчанию)
+  install            Установить или обновить службу (root/Администратор)
+  uninstall          Удалить службу; --purge удаляет также настройки и индекс
+  status             Состояние службы и индекса, адрес и ключ
+  token              Показать адрес и ключ (root/Администратор)
+  --wizard           Мастер установки и управления Windows
+  --version          Версия программы
+  --help             Эта справка
+
+Настройки:
+  --config <путь>     Файл настроек; переменные окружения имеют приоритет
+  --docs <путь>       Папка документов для установки
+  --cue-address <адрес>  Адрес из Cue, например vs.cuechat.org
+  --cue-code <код>    Одноразовый код из Cue (XXXX-XXXX-XXXX, действует 24 часа)
+  --tunnel-token <токен>  Свой токен Cloudflare (безопаснее вводить интерактивно)
+  --public-url <URL>  Публичный HTTPS-адрес своего туннеля
+  --port <число>      Порт (по умолчанию 3000; для адреса Cue задаётся Cue)
+  --user <имя>        Пользователь службы Linux; Windows использует SYSTEM
+  --yes              Без вопросов; --docs обязателен впервые, без подключения — локально
+
+CUE_URL — адрес кабинета для активации (по умолчанию https://app.cuechat.org).
+Для Windows: скачайте exe и откройте двойным щелчком — запустится мастер.
+Код и токен туннеля не сохраняются в журнале; безопаснее вводить их по запросу.
+`;
 
 export async function main(args = process.argv.slice(2)): Promise<void> {
   process.umask(0o077);
   if (args[0] === '--') args.shift();
+  if (wizardMode(args, process.platform, Boolean(process.stdin.isTTY))) { await launchWindowsWizard(); return; }
   if (args.includes('--help')) { console.log(HELP); return; }
   if (args.includes('--version')) { console.log(`documents-mcp ${VERSION}`); return; }
   let command = 'run';
@@ -20,13 +49,13 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
   for (let index = 0; index < args.length; index++) {
     const key = args[index]!;
     if (['--yes', '--purge'].includes(key)) { flags[key] = true; continue; }
-    if (!['--config', '--docs', '--tunnel-token', '--public-url', '--port', '--user'].includes(key) || args[index + 1] === undefined) throw new Error('Неизвестный параметр или отсутствует значение. Используйте --help.');
+    if (!['--config', '--docs', '--cue-address', '--cue-code', '--tunnel-token', '--public-url', '--port', '--user'].includes(key) || args[index + 1] === undefined) throw new Error('Неизвестный параметр или отсутствует значение. Используйте --help.');
     flags[key] = args[++index]!;
   }
   const file = typeof flags['--config'] === 'string' ? flags['--config'] : defaultPaths().config;
   if (['install', 'uninstall'].includes(command) && flags['--config']) throw new Error('Установка и удаление используют стандартный системный файл настроек; --config допустим для run, status и token.');
   if (command === 'install') {
-    const options: InstallOptions = { docs: flags['--docs'] as string | undefined, tunnelToken: flags['--tunnel-token'] as string | undefined, publicUrl: flags['--public-url'] as string | undefined, port: flags['--port'] as string | undefined, user: flags['--user'] as string | undefined, yes: Boolean(flags['--yes']) };
+    const options: InstallOptions = { docs: flags['--docs'] as string | undefined, cueAddress: flags['--cue-address'] as string | undefined, cueCode: flags['--cue-code'] as string | undefined, tunnelToken: flags['--tunnel-token'] as string | undefined, publicUrl: flags['--public-url'] as string | undefined, port: flags['--port'] as string | undefined, user: flags['--user'] as string | undefined, yes: Boolean(flags['--yes']) };
     await install(options); return;
   }
   if (command === 'uninstall') { await uninstall(Boolean(flags['--purge'])); return; }
@@ -35,6 +64,7 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
     const settings = await configEnvironment(file, process.env, !flags['--config']);
     const state = await serviceAction('status', defaultPaths()).catch(() => 'не запущена или служба недоступна');
     console.log(`Версия: ${VERSION}\nСлужба: ${state}\nПорт: ${settings.PORT ?? '3000'}\nТуннель: ${settings.TUNNEL_TOKEN ? 'включён' : 'выключен'}`);
+    printConnection(settings);
     let database: DatabaseSync | undefined;
     try {
       database = new DatabaseSync(path.join(settings.INDEX_DIR ?? defaultPaths().data, 'index.sqlite'), { readOnly: true });
@@ -57,6 +87,6 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
 }
 
 void main().catch((error: unknown) => {
-  const message = error instanceof Error && !('code' in error) && !(error instanceof SyntaxError) ? error.message : 'Не удалось выполнить команду. Проверьте настройки, права, журнал службы и занятость порта.';
+  const message = commandError(error);
   log({ level: 'error', message }); process.exitCode = 1;
 });
