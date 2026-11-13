@@ -1,0 +1,89 @@
+import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
+import { createHash, timingSafeEqual } from 'node:crypto';
+import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+import type { Config } from './config.js';
+import { createMcpServer } from './mcp.js';
+import type { Tools } from './tools.js';
+import { MAX_TEXT, type Logger } from './types.js';
+
+export const BODY_LIMIT = MAX_TEXT * 6 + 100_000;
+function rpcError(response: ServerResponse, status: number, message: string, code = -32600): void {
+  response.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+  response.end(JSON.stringify({ jsonrpc: '2.0', id: null, error: { code, message } }));
+}
+
+export function authorized(header: string | undefined, token: string): boolean {
+  const expected = createHash('sha256').update(token).digest();
+  const match = /^Bearer ([\x21-\x7e]+)$/u.exec(header ?? '');
+  const supplied = createHash('sha256').update(match?.[1] ?? '').digest();
+  return timingSafeEqual(expected, supplied) && match !== null;
+}
+
+async function body(request: IncomingMessage): Promise<unknown> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    let length = 0;
+    let done = false;
+    const finish = (error?: Error) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      request.removeListener('data', data);
+      request.removeListener('end', end);
+      request.removeListener('aborted', aborted);
+      if (error) { chunks.length = 0; request.resume(); reject(error); }
+      else {
+        try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf8')) as unknown); }
+        catch (failure) { reject(failure); }
+      }
+    };
+    const data = (bytes: Buffer) => {
+      length += bytes.length;
+      if (length > BODY_LIMIT) finish(new RangeError('body limit'));
+      else chunks.push(bytes);
+    };
+    const end = () => finish();
+    const aborted = () => finish(new Error('request aborted'));
+    const timer = setTimeout(() => finish(new Error('request timeout')), 15_000);
+    request.on('data', data);
+    request.once('end', end);
+    request.once('aborted', aborted);
+    request.once('error', () => finish(new Error('request error')));
+  });
+}
+
+export function createHttpServer(config: Config, tools: Tools, logger: Logger) {
+  let active = 0;
+  const server = createServer({ maxHeaderSize: 16 * 1024, requestTimeout: 15_000, headersTimeout: 10_000 }, (request, response) => {
+    const start = performance.now();
+    response.once('finish', () => logger({ method: request.method, status: response.statusCode, duration_ms: Math.round(performance.now() - start) }));
+    response.setHeader('Cache-Control', 'no-store');
+    response.setHeader('X-Content-Type-Options', 'nosniff');
+    const route = (request.url ?? '').split('?')[0];
+    if (route === '/healthz' && request.method === 'GET') { response.writeHead(200, { 'Content-Type': 'text/plain' }); response.end('ok'); return; }
+    if (route !== '/mcp') { rpcError(response, 404, 'Не найдено.'); return; }
+    if (!authorized(request.headers.authorization, config.token)) { response.setHeader('WWW-Authenticate', 'Bearer'); rpcError(response, 401, 'Требуется действительный токен доступа.', -32001); return; }
+    if (request.method !== 'POST') { response.setHeader('Allow', 'POST'); rpcError(response, 405, 'Метод не поддерживается. Используйте POST.'); return; }
+    if (request.headers.origin) { rpcError(response, 403, 'Запросы из браузера не разрешены.'); return; }
+    if (Number(request.headers['content-length'] ?? 0) > BODY_LIMIT) { rpcError(response, 413, 'Запрос превышает допустимый размер.'); request.resume(); return; }
+    if (active >= 64) { rpcError(response, 429, 'Слишком много запросов. Повторите позже.'); request.resume(); return; }
+    active++;
+    void (async () => {
+      const mcp = createMcpServer(tools, logger);
+      const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
+      let cleaned = false;
+      const cleanup = () => { if (!cleaned) { cleaned = true; active--; void mcp.close().catch(() => {}); } };
+      response.once('close', cleanup);
+      try {
+        const parsed = await body(request);
+        await mcp.connect(transport);
+        await transport.handleRequest(request, response, parsed);
+      } catch (error) {
+        if (!response.headersSent && !response.destroyed) rpcError(response, error instanceof RangeError ? 413 : error instanceof SyntaxError ? 400 : 500, error instanceof RangeError ? 'Запрос превышает допустимый размер.' : error instanceof SyntaxError ? 'Некорректный JSON.' : 'Не удалось обработать запрос.', error instanceof SyntaxError ? -32700 : -32603);
+        else if (!response.writableEnded) response.end();
+      } finally { if (response.writableEnded || response.destroyed) cleanup(); }
+    })();
+  });
+  server.keepAliveTimeout = 5000;
+  return server;
+}

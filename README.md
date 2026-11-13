@@ -1,0 +1,227 @@
+# documents-mcp
+
+A read/write MCP server over an existing document folder. **One executable, one installation command.** No Node.js, Docker, Tesseract, Poppler or separate cloudflared installation is needed on the destination server. The executable includes Node, SQLite FTS5, PDF extraction, multilingual WASM OCR and Cloudflare Tunnel. All application UI, tools and errors are in Russian. Writing is enabled by default; optional `READ_ONLY=1` hides all seven write/trash tools.
+
+## Install: Linux
+
+Download the executable for the server architecture (`documents-mcp-linux-x64` or `documents-mcp-linux-arm64`), verify it against the accompanying `SHA256SUMS`, and give it execute permission. You may rename it to `documents-mcp`.
+
+```sh
+chmod +x documents-mcp
+sudo ./documents-mcp install
+```
+
+The **installation command** asks for the existing documents folder, an optional Cloudflare tunnel token (input is hidden), and an optional public HTTPS hostname. It generates a new 256-bit bearer token, installs and starts a systemd service, checks local health, optionally checks public health for up to 60 seconds, and prints the MCP URL and authorization header. Failure of the public check is a warning: DNS or the tunnel route may not be ready yet. Installation requires root and a Linux host running systemd.
+
+Paths:
+
+| Item | Location |
+| --- | --- |
+| Executable | `/usr/local/bin/documents-mcp` |
+| Config | `/etc/documents-mcp/config.env` |
+| Index and runtime assets | `/var/lib/documents-mcp` |
+| Service | `/etc/systemd/system/documents-mcp.service` |
+
+By default the service runs as the dedicated system user `documents-mcp`, not root. The config is mode `0600`, owned by that service user; root can also read it. The service has read-only filesystem protection, a private temporary directory and explicit `ReadWritePaths` exceptions for its data directory and the documents folder. With `READ_ONLY=1`, documents use `ReadOnlyPaths` instead. Installation and upgrades always regenerate this unit; there is no write-permission question.
+
+The service account must be able to **traverse every parent directory and read/write the documents**. Installation checks read/traverse/write access to the root folder (read/traverse only with `READ_ONLY=1`) and reports the exact ACL fix when it fails. For example, with ACL tools already available:
+
+```sh
+sudo setfacl -R -m u:documents-mcp:rwX /srv/company/documents
+sudo setfacl -R -d -m u:documents-mcp:rwX /srv/company/documents
+sudo setfacl -m u:documents-mcp:x /srv /srv/company
+```
+
+The default ACL applies to future files and folders. Alternatively, choose an **existing** account with read/write access:
+
+```sh
+sudo ./documents-mcp install --user document-editor
+```
+
+The application does not install ACL utilities or modify document permissions automatically. Permission to read/write the folder itself does not guarantee permission to every child; unreadable children cannot be indexed and protected descendants cannot be changed.
+
+## Install: Windows
+
+Download `documents-mcp-win-x64.exe`, verify its SHA-256, optionally rename it to `documents-mcp.exe`, open PowerShell **as Administrator**, and run:
+
+```powershell
+.\documents-mcp.exe install
+```
+
+The executable is **unsigned**; SmartScreen or organizational application-control policy may require explicit approval. Do not bypass your organization's security policy.
+
+The program installs under `%ProgramFiles%\documents-mcp`, with config and data under `%ProgramData%\documents-mcp`. ACLs restrict these locations to **SYSTEM and Administrators**. It registers a native Task Scheduler task named `documents-mcp`: a boot trigger, SYSTEM identity, no logged-in user required, no execution time limit, and restart-on-failure every minute (up to 999 consecutive retries). This deliberately uses the built-in scheduler instead of shipping a separate service wrapper: a Node SEA does not implement the Windows Service Control Manager protocol. `status` shows the task state.
+
+The Windows installer supports **local document folders only**. SYSTEM already normally has write access to local folders; restricted document ACLs still apply. SYSTEM cannot generally read a network share using your interactive credentials. UNC paths and `--user` on Windows are rejected with an explanation. For network documents, copy/synchronize them into a local folder or arrange a separate domain-account task with your administrator; that account configuration is not automated here.
+
+macOS ARM64 binaries support `run`, `status`, help and version for local use/testing. The installer intentionally supports Linux/systemd and Windows, not launchd.
+
+## Create the Cloudflare Tunnel
+
+1. In your Cloudflare account, add a domain you control. Open **Zero Trust → Networks → Connectors / Tunnels** and create a **remotely managed Cloudflare Tunnel**. Dashboard labels may change.
+2. Copy only its tunnel token, not the entire suggested Docker/shell command. Enter that token during `install`. You do not install Cloudflare's command-line program separately.
+3. Add a public hostname, for example `documents.example.com`, with service type **HTTP** and service URL **`http://localhost:3000`**. Replace the port if you changed it with `--port`.
+4. Enter `https://documents.example.com` as the installer's optional public URL. Do not add `/mcp` there.
+
+The embedded supervisor starts `cloudflared tunnel --no-autoupdate run`. The tunnel token is passed in the child's **`TUNNEL_TOKEN` environment variable**, never its arguments. The child does not receive `MCP_TOKEN`. Output lines are prefixed `[tunnel]`, the exact tunnel token is redacted, and failed children restart with exponential backoff from 1 to 30 seconds. Shutdown stops the child. With a tunnel, the HTTP server always binds **`127.0.0.1`**, even if `HOST` says otherwise. No inbound firewall port needs to be opened.
+
+Without a tunnel, installation is local-only by default. Cloudflare Access login pages are not MCP bearer authentication; if you put an additional Access policy in front, the client must be able to satisfy it. Configure WAF/rate limiting as appropriate. No account, hostname or live tunnel is created by this repository.
+
+## Connect an MCP client
+
+The installer prints exactly the connection values. Configure a Streamable HTTP connection with:
+
+```text
+URL: https://documents.example.com/mcp
+Authorization: Bearer <the generated MCP_TOKEN>
+```
+
+For clients accepting a JSON definition (the outer schema varies by client):
+
+```json
+{
+  "mcpServers": {
+    "documents": {
+      "url": "https://documents.example.com/mcp",
+      "headers": { "Authorization": "Bearer <MCP_TOKEN>" }
+    }
+  }
+}
+```
+
+Retrieve the saved values later with `sudo documents-mcp token`, or `documents-mcp.exe token` from an Administrator terminal. This is a shared bearer credential granting access to **all visible documents**, not OAuth or per-user document authorization.
+
+| Tool | Purpose |
+| --- | --- |
+| `search_documents` | Stemmed Russian/English search, optional folder, ranked documents and excerpts |
+| `list_folder` | Visible files and folders, readability and indexing status |
+| `read_document` | Text with page/sheet labels and character-offset paging |
+| `documents_status` | Index progress, partial documents and failures |
+| `create_folder` | `path`; creates intermediate folders, idempotent for existing folders |
+| `write_document` | `path`, `content`, optional `overwrite=false`, `expected_modified`, `replace_office=false` |
+| `edit_document` | `path`, required `expected_modified`, 1–50 `edits: [{old_text, new_text, replace_all?}]` |
+| `move_path` | `from`, `to`, optional `overwrite=false`; files and folders |
+| `delete_path` | `path`; recursively moves the item to the 30-day trash |
+| `list_trash` | No arguments; newest 200 entries, ids, paths, kinds, sizes, reasons and expiration |
+| `restore_from_trash` | `id`, optional `to`, optional `overwrite=false` |
+
+The original four tools keep `readOnlyHint: true`, non-destructive, idempotent, closed-world annotations. All seven additional tools have `readOnlyHint: false` and `openWorldHint: false`; only `create_folder` is idempotent, and all mutation tools except `create_folder` are destructive (`list_trash` is non-destructive). An MCP client may offer only read-only tools in unattended runs, so writes happen in conversations with a person. No resources or prompts are exposed. `/healthz` returns only `ok`, without credentials or document details.
+
+### Writing and recovery
+
+Read before editing. `read_document` and every file in `list_folder` report modification time as **ISO UTC with milliseconds**, e.g. `2026-11-13T12:34:56.789Z`. Pass that exact value as `expected_modified`; a stale/missing value refuses replacement and asks you to re-read. File listings and reads also identify editable text, replaceable Office documents, or read-only formats. Prefer `edit_document` for small text changes. Edits apply in order, require one exact match unless `replace_all=true`, normalize line endings while matching, preserve the file's CRLF/LF style, and write nothing if any edit fails.
+
+- Freely writable text: `.txt .md .markdown .csv .tsv .json .xml .yaml .yml .log .ini .html .htm`. New files are UTF-8; replacements and edits preserve UTF-8/UTF-16 BOMs and Windows-1251 encoding. Unencodable characters cause an error rather than data loss.
+- Create `.docx` with `docx` (pure JavaScript): `#`–`###` headings, paragraphs, `-`/`1.` lists, `**bold**`, `*italic*`, and `|` tables (first row header). Output uses Calibri 11, A4 and normal margins. This is a deliberately small Markdown-like subset, not a full Markdown renderer.
+- Create `.xlsx` with the bundled SheetJS: CSV, TSV or Markdown tables; start sheets with `## Лист: Имя`. Numbers, ISO dates and percentages become typed cells; column widths are fitted. SheetJS Community 0.20.3 does not write custom font styling or frozen panes: **bold headers and frozen rows are not emitted**. Untrusted strings are written as strings, not formulas.
+- Existing DOCX/XLSX require **both** `overwrite=true` with `expected_modified` **and** `replace_office=true`: replacement rebuilds the entire document and **loses previous formatting**. PDF, images, DOC, XLS, PPTX, RTF and ODS remain read-only, but may be moved, renamed and deleted.
+- Before replacement/editing, the previous version is copied to `<DOCS_ROOT>/.documents-mcp-trash/<id>/item`. Deletes and overwritten move targets are renamed there on the same filesystem. `meta.json` records original path, kind, bytes, reason and deletion time. Keep backups separately too: this is recovery, not permanent backup.
+- Trash entries expire after 30 days and are purged on each rescan (purging is disabled in read-only mode). `list_trash` hides expired entries. Restore to the original path or `to`; a conflict needs `overwrite=true`, which backs up the current item first. Trash is never indexed, listed or directly addressable by document tools; Windows also receives a best-effort hidden attribute.
+- Content is capped at 5,000,000 UTF-16 code units; the complete HTTP JSON request must fit 30,100,000 bytes, including escaping and edit arrays. Writes are atomic, file-synced, preserve existing modes and are serialized in-process with folder changes and scans. New files use exclusive atomic hard-link publication (the filesystem must support hard links); replacement uses same-folder temporary files and rename, with a final modification check. The index is refreshed before a successful mutation returns. Logs contain tool, paths, bytes and outcome, never document content.
+- Writes refuse the root, symlinks (including inside-root aliases), excluded/hidden names, Windows-invalid/control characters, reserved device names, trailing dots/spaces, components over 255 UTF-8 bytes and paths over 1000 characters. Recursive folder operations also refuse protected descendants, including descendants that would become ignored at the destination. Create parent folders explicitly with `create_folder`; restore can recreate parents.
+
+Document contents are data, not instructions. Bearer access now authorizes changes to all visible documents: share it accordingly. Mutation serialization covers this server process, not other applications or multiple server processes; arbitrary malicious concurrent filesystem replacement is not a complete OS-level sandbox.
+
+## Upgrade, status and uninstall
+
+Download a new executable to a **different file** from the installed copy and run `install` again as root/Administrator. Existing settings and the bearer token are kept unless a flag changes the corresponding setting. Installation stops the previous service/task, replaces its executable, and starts it again. Do not overwrite a running executable manually, especially on Windows.
+
+```sh
+sudo ./documents-mcp install --yes --docs /srv/documents --port 3000
+sudo documents-mcp status
+sudo documents-mcp token
+sudo documents-mcp uninstall          # keep config and index
+sudo documents-mcp uninstall --purge  # also remove config and data
+```
+
+Use the `.exe` equivalents on Windows. If you might need `--purge`, supply it on the first uninstall: the installed executable is removed. The Windows executable removes itself via a short-lived built-in PowerShell process after exiting. The Linux system user is left in place on uninstall. **Uninstall never deletes source documents or their trash**; document tools can delete into trash and the retention job permanently removes expired trash.
+
+Unattended installation accepts `--docs`, `--tunnel-token`, `--public-url`, `--port`, `--user` (Linux) and `--yes`. The first unattended install requires `--docs`; omitted settings retain their previous values. An explicitly empty `--tunnel-token ""` disables the tunnel. Prefer interactive hidden token input: a token supplied to the **installer flag** can be visible in shell history and the installer's process arguments. It is never copied into cloudflared's arguments or the generated unit/task.
+
+## Configuration
+
+`documents-mcp` or `documents-mcp run` starts the server. `--config <path>` selects a file; an explicitly selected missing file is an error. Defined environment variables override file values. The default config location is platform-specific as listed above; on macOS it is `~/Library/Application Support/documents-mcp/config.env`. Missing default files are allowed for an environment-only/source run.
+
+The config uses literal `KEY=value` lines, or `KEY="JSON-escaped value"` as generated by the installer, plus whole-line `#` comments. No shell expansion, command evaluation, interpolation or implicit `.env` loading occurs. Restrict config permissions and backups; it contains both tokens.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `DOCS_ROOT` | required | Existing absolute document directory |
+| `MCP_TOKEN` | required | At least 32 printable ASCII characters without spaces; installer generates 64 hex characters |
+| `HOST` | `127.0.0.1` | Listening address; forced to loopback with a tunnel |
+| `PORT` | `3000` | Port, 1–65535 |
+| `INDEX_DIR` | `./data` for environment-only runs | Private index, outside documents; installer sets the system data directory |
+| `TUNNEL_TOKEN` | empty | Optional remotely managed Cloudflare tunnel token |
+| `PUBLIC_URL` | empty | Optional HTTPS origin, used to print/check the connection, not to configure Cloudflare |
+| `OCR_LANGS` | `rus+bel+eng` | Nonempty subset of these three **bundled** languages |
+| `RESCAN_MINUTES` | `10` | Positive interval between scans |
+| `MAX_FILE_MB` | `100` | Maximum input size in MiB, up to 1024 |
+| `OCR_MAX_PAGES` | `300` | Maximum scanned PDF pages OCRed per document |
+| `IGNORE` | empty | Comma-separated relative globs, e.g. `**/archive/**,**/*.bak` |
+| `READ_ONLY` | unset (writing enabled) | Optional `1` hides all seven write/trash tools and disables trash purge; other values leave writing enabled |
+| `SERVICE_USER` | `documents-mcp` | Saved Linux installer account; change with `install --user` |
+
+Dotfiles/directories, `~$*`, `Thumbs.db`, `desktop.ini` and `node_modules` are hidden. Ignore rules apply to both requested paths and symlink targets; a directory match hides descendants. Tool paths use `/`, never absolute paths or Windows backslashes. Escaping symlinks and traversal are rejected.
+
+## Formats, OCR and limits
+
+Supported: UTF-8/BOM UTF-16/Windows-1251 text, Markdown, CSV/TSV, JSON, XML, YAML, logs, INI, basic RTF/HTML, DOCX/DOC, XLSX/XLS/ODS, PDF, **PNG/JPEG/BMP/TIFF/WEBP**, and PPTX slide text. All five image families were exercised with offline OCR; unknown image signatures are marked unsupported instead of being passed blindly to OCR. Word tables retain row boundaries and `|` separators; spreadsheets use tabs and ISO dates.
+
+PDF extraction uses **unpdf's serverless pdf.js build**, without canvas or native modules. Text is ordered by baseline and horizontal position, preserving line breaks and table-column gaps. Pages with fewer than 20 letters use decoded image XObjects/inline images from the operator list. The largest image is converted from RGB/RGBA/packed 1-bit or grayscale pixels into a PNG and OCRed. PDF.js handles JPEG, CCITT and JBIG2 decoding. This does **not** render vector-only scans, composite a tiled page or merge multiple image fragments; unavailable/failed scan extraction is marked partial. PDF image decoding is capped at 36 million pixels.
+
+Tesseract.js/WASM runs on a worker thread. One OCR worker is reused across pages and files, with offline `4.0.0_best_int` Russian, Belarusian and English data from npm. No language or WASM downloads occur at runtime. Each OCR operation has a 60-second deadline; each whole-file extraction has a 10-minute deadline. Inputs are copied through guarded file descriptors to private snapshots before parsing, with a file-size limit and change detection. Extracted text is capped at 5 million UTF-16 code units; sheets at 100001 rows and 1000 columns. Cap truncations are marked partial. Reads stop waiting after 45 seconds while the queued job continues.
+
+Scans are periodic, not file watchers. Changes and deletions are checked before disclosure; unchanged failed files are retried after modification or index rebuild. One extraction runs at a time, and concurrent reads share the same job. Offsets count UTF-16 code units of the rendered text including part labels, zero-based and end-exclusive.
+
+Unsupported/limited: encrypted documents, arbitrary archives, legacy `.ppt`, macros, formula recalculation, embedded attachments, DOCX image OCR, chart/image interpretation, full visual layout and guaranteed handwriting accuracy. Multi-frame TIFF is not split into separately labelled pages. OCR is imperfect: verify important numbers and facts against originals. This is not a complete hostile-document sandbox; WASM/native allocations are not a hard process-memory quota. The SQLite index contains original document text and must be protected like the documents.
+
+## Build from source and build executables
+
+Source development requires **Node >=24** and pnpm 11. The release binaries pin **Node 24.22.3 LTS** in `scripts/binary-versions.json`, independent of the build machine's Node. No extraction CLI tools are needed.
+
+```sh
+pnpm install
+pnpm build                    # TypeScript + bundled runtime; downloads host cloudflared once
+pnpm test                     # offline after package installation; no external OCR/PDF tools
+pnpm dev -- run --config /absolute/path/config.env
+pnpm build:binary             # all four targets
+pnpm build:binary --target linux-x64,linux-arm64
+```
+
+Alternatively run `node dist/main.js run --config ...` or use environment variables. `pnpm dev` prepares runtime assets and can run without a tunnel before a build. For source-mode tunneling, run `pnpm build` first to populate the pinned host cloudflared cache. `pnpm sample` exercises generated fixtures using the SDK.
+
+Outputs are `release/documents-mcp-<target>[.exe]` and `release/SHA256SUMS`. Supported targets: `linux-x64`, `linux-arm64`, `win-x64`, `darwin-arm64`. Downloads and temporary build products are under git-ignored `.cache/`; outputs under ignored `release/`.
+
+Linux executables use the official glibc Node builds, tested on Debian bookworm; Alpine/musl is not a supported target. See [IMPLEMENTATION_REPORT.md](IMPLEMENTATION_REPORT.md) for measured sizes, actual MCP/OCR output, service restart/upgrade checks and remaining platform limitations.
+
+The build verifies each official Node archive/executable against that version's `https://nodejs.org/dist/v<VERSION>/SHASUMS256.txt`. If the local Node version differs, the build downloads and uses the **exact pinned host version** to generate every SEA blob. Code cache and snapshots are disabled for cross-target compatibility. esbuild produces a CommonJS main and bundled extraction/OCR workers. Worker scripts, pdf.js including its JS/WASM decoders, traineddata, OCR core JS/WASM and target-specific cloudflared are SEA assets. `postject` injects the blob. A macOS host with `codesign` is required to remove the original Darwin signature and ad-hoc sign the result; Windows outputs are not Authenticode signed. ELF/PE injection can emit informational section/signature warnings.
+
+At first start, assets are verified and extracted under `<INDEX_DIR>/runtime/<version>-<manifest content hash>/`, with private directories and files. Existing assets are SHA-256 checked and reused; corrupted assets are replaced from the executable and old version directories removed. The main process and extraction workers do not need the source tree or an installed `node_modules` directory.
+
+Cloudflared **2026.11.0** and the four download SHA-256 values are pinned together in `scripts/binary-versions.json`. To bump: inspect the official `cloudflare/cloudflared` GitHub release, download its four named assets, independently compute SHA-256 (the Darwin hash covers the `.tgz`), update the version/hashes in that one file, rebuild all targets, and rerun binary verification. The builder rejects checksum mismatches, including corrupted cache entries. Bump Node in the same file after confirming LTS support and rerun all tests. No runtime self-update is performed.
+
+## Docker alternative
+
+Docker is **optional**, not the main installation path. The Dockerfile uses Node 24 and the same pure-JS/WASM runtime: it installs no Poppler or OCR packages. Compose uses a non-root user, a read-only container filesystem with a **read-write document bind mount**, a private temporary directory, no added capabilities and a separate index volume. Grant the container user write access to the document folder. Optional `READ_ONLY=1` hides write tools; for an additional mount-level restriction, change the document mount to `:ro`. Cloudflared runs inside the application container from the bundled assets, not a separate image.
+
+Set `DOCS_PATH`, `MCP_TOKEN` and optionally `TUNNEL_TOKEN` in `.env`, protect it with mode `0600`, grant UID/GID 1000 read/traverse access to documents, then run:
+
+```sh
+docker compose up -d --build
+docker compose logs --tail=50 documents-mcp
+docker compose exec documents-mcp node -e "fetch('http://127.0.0.1:3000/healthz').then(r=>console.log(r.status))"
+```
+
+Use the same Cloudflare service URL **`http://localhost:3000`**, since the embedded tunnel shares the application container. Compose publishes no host port. If you intentionally need direct local access without a tunnel, add an explicit loopback-only port mapping and keep bearer authentication.
+
+## Troubleshooting
+
+- **Linux service:** `sudo systemctl status documents-mcp`, `sudo journalctl -u documents-mcp -n 100 --no-pager`. `Restart=always` restarts application crashes; the tunnel also has its own backoff loop.
+- **Windows:** inspect Task Scheduler → `documents-mcp`, its Last Run Result and task history. `documents-mcp.exe status` displays scheduler output and index counters. Confirm Administrator execution and local folder ACLs.
+- **Local health fails:** check `PORT`, another process using it, config/data permissions, free disk space and folder access. Installation remains present for diagnosis if startup checks fail.
+- **Public health fails, local works:** inspect `[tunnel]` logs, the saved token, DNS, outbound network policy and the exact Cloudflare service URL. `PUBLIC_URL` alone does not create a route or DNS record.
+- **401:** use the saved **MCP token**, not the Cloudflare tunnel token. `token` prints it only with elevated privileges.
+- **OCR language error:** `OCR_LANGS` accepts only `rus`, `bel`, `eng` joined by `+`; there are no runtime downloads or optional system language packs.
+- **Partial/failed file:** use `documents_status`; check page/file/text limits, encryption and scan structure. Correct or modify the file to retry. To rebuild, stop the service first, delete only its index database/WAL/SHM, then start again; keep config/tokens.
+- **Runtime integrity/disk error:** runtime files are reconstructible cache. Stop the service, remove only its `runtime` directory, fix permissions/free space, then restart. Never place the index inside documents.
+- **Corporate proxies or AV policies:** build downloads require access to nodejs.org/GitHub; destination OCR needs no network, but Cloudflare Tunnel needs permitted outbound access. Ad-hoc signing on macOS is not notarization.

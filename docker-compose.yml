@@ -1,0 +1,24 @@
+services:
+  documents-mcp:
+    build: .
+    environment:
+      MCP_TOKEN: ${MCP_TOKEN:?Set MCP_TOKEN in .env}
+      OCR_LANGS: ${OCR_LANGS:-rus+bel+eng}
+      RESCAN_MINUTES: ${RESCAN_MINUTES:-10}
+      MAX_FILE_MB: ${MAX_FILE_MB:-100}
+      OCR_MAX_PAGES: ${OCR_MAX_PAGES:-300}
+      IGNORE: ${IGNORE:-}
+      READ_ONLY: ${READ_ONLY:-0}
+      TUNNEL_TOKEN: ${TUNNEL_TOKEN:-}
+    volumes:
+      - ${DOCS_PATH:?Set DOCS_PATH in .env}:/documents:rw
+      - document-index:/data
+    read_only: true
+    tmpfs:
+      - /tmp:size=512m,mode=1777
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    init: true
+    restart: unless-stopped
+volumes:
+  document-index:
