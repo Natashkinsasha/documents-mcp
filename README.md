@@ -119,6 +119,42 @@ Retrieve the saved values later with `sudo documents-mcp token`, or `documents-m
 
 The original four tools keep `readOnlyHint: true`, non-destructive, idempotent, closed-world annotations. All seven additional tools have `readOnlyHint: false` and `openWorldHint: false`; only `create_folder` is idempotent, and all mutation tools except `create_folder` are destructive (`list_trash` is non-destructive). An MCP client may offer only read-only tools in unattended runs, so writes happen in conversations with a person. No resources or prompts are exposed. `/healthz` returns only `ok`, without credentials or document details.
 
+### Read-only file browser HTTP API
+
+Two additional read-only HTTP endpoints let a client such as Cue show expandable folders and preview original files. They are not MCP tools: the tool list, tool descriptions and server instructions are unchanged. They use the same `Authorization: Bearer <MCP_TOKEN>`, refuse any request with an `Origin` header (browser requests), answer only `GET`, send `Cache-Control: no-store` and `X-Content-Type-Options: nosniff`, and share the `/mcp` limit of 64 concurrent requests; at most 4 file downloads are buffered at once. `READ_ONLY=1` does not change them, and they never write, index or touch the trash.
+
+`GET /browse/files?path=<relative>&offset=<n>` lists one folder. `path` is relative with `/` separators, `''` (or omitted) is the root; `offset` is a non-negative integer (default `0`). The response is:
+
+```json
+{
+  "path": "Договоры",
+  "entries": [
+    { "name": "2026", "path": "Договоры/2026", "kind": "directory", "size": null, "version": null },
+    { "name": "Договор 2.pdf", "path": "Договоры/Договор 2.pdf", "kind": "file", "size": 48213, "version": "<64 hex>" }
+  ],
+  "nextOffset": null
+}
+```
+
+Pages hold 200 entries: folders first, then files, each sorted by name with the Russian numeric collation (`Папка 2` before `Папка 10`). `nextOffset` is the offset of the next page, or `null` at the end; an offset past the end returns an empty page. `size` is the exact byte size. `version` is an opaque SHA-256 of the file's dev, inode, size, mtime and ctime; it changes on every modification or replacement, and is `null` for folders. Only visible entries are listed: symlinks (to files or folders, inside or outside the root), hidden/ignored names, the trash and anything outside `DOCS_ROOT` are omitted, and requested paths are resolved component by component without following symlinks.
+
+`GET /browse/file?path=<relative>&version=<version>` returns the original bytes as `application/octet-stream` with `Content-Length`, `Content-Disposition: attachment` (no file name) and a sandboxing `Content-Security-Policy`; no response header contains the path or other request data. `version` must be the exact value from the listing. The file is checked before opening, opened without following symlinks, checked again by descriptor and by path, read whole, and checked once more before any byte is sent. The limit is 30 MiB, or `MAX_FILE_MB` when lower.
+
+Errors are JSON `{ "error": "<neutral Russian text>", "code": "<code>" }` and never include absolute paths or system error text:
+
+| Status | `code` | When |
+| --- | --- | --- |
+| 400 | `invalid_request` | Missing `path`/`version` on `/browse/file`, malformed `version`/`offset`, repeated or unknown parameters, path over 4096 characters |
+| 401 | `invalid_request` | Missing or wrong bearer token (`WWW-Authenticate: Bearer`) |
+| 403 | `invalid_request` | `Origin` header present |
+| 404 | `file_missing` | Missing path, traversal, absolute or Windows path, symlink, hidden/ignored entry, folder requested as a file or file as a folder |
+| 405 | `invalid_request` | Method other than `GET` (`Allow: GET`) |
+| 409 | `file_changed` | `version` no longer matches, or the file changed while being read; list the folder again |
+| 413 | `file_too_large` | File over the browse limit |
+| 429 / 503 | `unavailable` | Too many concurrent requests (`Retry-After: 1`) / unexpected failure |
+
+`/mcp` and `/healthz` behave as before.
+
 ### Writing and recovery
 
 Read before editing. `read_document` and every file in `list_folder` report modification time as **ISO UTC with milliseconds**, e.g. `2026-11-13T12:34:56.789Z`. Pass that exact value as `expected_modified`; a stale/missing value refuses replacement and asks you to re-read. File listings and reads also identify editable text, replaceable Office documents, or read-only formats. Prefer `edit_document` for small text changes. Edits apply in order, require one exact match unless `replace_all=true`, normalize line endings while matching, preserve the file's CRLF/LF style, and write nothing if any edit fails.

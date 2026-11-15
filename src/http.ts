@@ -5,12 +5,22 @@ import type { Config } from './config.js';
 import { createMcpServer } from './mcp.js';
 import type { Tools } from './tools.js';
 import { MAX_TEXT, type Logger } from './types.js';
+import { BROWSE_MESSAGES, BrowseError, Browser, browseQuery, type BrowseCode } from './browse.js';
+import { PathGuard } from './paths.js';
 
 export const BODY_LIMIT = MAX_TEXT * 6 + 100_000;
 function rpcError(response: ServerResponse, status: number, message: string, code = -32600): void {
   response.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
   response.end(JSON.stringify({ jsonrpc: '2.0', id: null, error: { code, message } }));
 }
+
+function browseError(response: ServerResponse, status: number, code: BrowseCode, message: string = BROWSE_MESSAGES[code]): void {
+  response.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+  response.end(JSON.stringify({ error: message, code }));
+}
+
+export const BROWSE_FILE_CONCURRENCY = 4;
+const BROWSE_ROUTES = new Set(['/browse/files', '/browse/file']);
 
 export function authorized(header: string | undefined, token: string): boolean {
   const expected = createHash('sha256').update(token).digest();
@@ -52,8 +62,9 @@ async function body(request: IncomingMessage): Promise<unknown> {
   });
 }
 
-export function createHttpServer(config: Config, tools: Tools, logger: Logger) {
+export function createHttpServer(config: Config, tools: Tools, logger: Logger, browser = new Browser(new PathGuard(config.docsRoot, config.ignore), config)) {
   let active = 0;
+  let reading = 0;
   const server = createServer({ maxHeaderSize: 16 * 1024, requestTimeout: 15_000, headersTimeout: 10_000 }, (request, response) => {
     const start = performance.now();
     response.once('finish', () => logger({ method: request.method, status: response.statusCode, duration_ms: Math.round(performance.now() - start) }));
@@ -61,6 +72,45 @@ export function createHttpServer(config: Config, tools: Tools, logger: Logger) {
     response.setHeader('X-Content-Type-Options', 'nosniff');
     const route = (request.url ?? '').split('?')[0];
     if (route === '/healthz' && request.method === 'GET') { response.writeHead(200, { 'Content-Type': 'text/plain' }); response.end('ok'); return; }
+    if (BROWSE_ROUTES.has(route!)) {
+      const browseRoute = route as '/browse/files' | '/browse/file';
+      if (!authorized(request.headers.authorization, config.token)) { response.setHeader('WWW-Authenticate', 'Bearer'); browseError(response, 401, 'invalid_request', 'Требуется действительный токен доступа.'); request.resume(); return; }
+      if (request.method !== 'GET') { response.setHeader('Allow', 'GET'); browseError(response, 405, 'invalid_request', 'Метод не поддерживается. Используйте GET.'); request.resume(); return; }
+      if (request.headers.origin !== undefined) { browseError(response, 403, 'invalid_request', 'Запросы из браузера не разрешены.'); request.resume(); return; }
+      if (active >= 64 || browseRoute === '/browse/file' && reading >= BROWSE_FILE_CONCURRENCY) { response.setHeader('Retry-After', '1'); browseError(response, 429, 'unavailable', 'Слишком много запросов. Повторите позже.'); request.resume(); return; }
+      let query: ReturnType<typeof browseQuery>;
+      try { query = browseQuery(request.url ?? '', browseRoute); }
+      catch { browseError(response, 400, 'invalid_request'); request.resume(); return; }
+      request.resume();
+      active++;
+      if (browseRoute === '/browse/file') reading++;
+      let released = false;
+      const release = () => { if (!released) { released = true; active--; if (browseRoute === '/browse/file') reading--; } };
+      response.once('close', release);
+      void (async () => {
+        try {
+          if (browseRoute === '/browse/files') {
+            const listing = await browser.list(query.path, query.offset);
+            if (response.destroyed) return;
+            response.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+            response.end(JSON.stringify(listing));
+          } else {
+            const bytes = await browser.read(query.path, query.version);
+            if (response.destroyed) return;
+            response.writeHead(200, {
+              'Content-Type': 'application/octet-stream', 'Content-Length': String(bytes.length), 'Cache-Control': 'no-store',
+              'X-Content-Type-Options': 'nosniff', 'Content-Disposition': 'attachment', 'Content-Security-Policy': "default-src 'none'; sandbox",
+            });
+            response.end(bytes);
+          }
+        } catch (error) {
+          if (response.headersSent || response.destroyed) { if (!response.writableEnded) response.destroy(); return; }
+          if (error instanceof BrowseError) browseError(response, error.status, error.code, error.message);
+          else browseError(response, 503, 'unavailable');
+        } finally { if (response.writableEnded || response.destroyed) release(); }
+      })();
+      return;
+    }
     if (route !== '/mcp') { rpcError(response, 404, 'Не найдено.'); return; }
     if (!authorized(request.headers.authorization, config.token)) { response.setHeader('WWW-Authenticate', 'Bearer'); rpcError(response, 401, 'Требуется действительный токен доступа.', -32001); return; }
     if (request.method !== 'POST') { response.setHeader('Allow', 'POST'); rpcError(response, 405, 'Метод не поддерживается. Используйте POST.'); return; }
