@@ -7,6 +7,7 @@ import { Store } from './index/store.js';
 import { Indexer } from './index/indexer.js';
 import { Tools } from './tools.js';
 import { createHttpServer } from './http.js';
+import { Browser } from './browse.js';
 import { log, type Logger } from './types.js';
 import { prepareRuntime } from './runtime.js';
 import { TunnelSupervisor } from './tunnel.js';
@@ -21,7 +22,7 @@ export async function createApp(config: Config, options: { logger?: Logger; read
   const extractor = new Extractor(guard, runtime, config.ocrLangs, config.maxFileBytes, config.ocrMaxPages);
   const indexer = new Indexer(config, guard, store, extractor, logger, new Trash(guard, options.now));
   const tools = new Tools(indexer, options.readWaitMs, logger);
-  const http = createHttpServer(config, tools, logger);
+  const http = createHttpServer(config, tools, logger, new Browser(guard, config));
   const tunnel = config.tunnelToken ? new TunnelSupervisor(path.join(runtime, process.platform === 'win32' ? 'cloudflared.exe' : 'cloudflared'), config.tunnelToken, logger) : undefined;
   let closed = false;
   return {
