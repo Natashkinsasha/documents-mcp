@@ -1,3 +1,4 @@
+import { VERSION } from '../src/version.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { elevationArguments, launchWindowsWizard, runWizard, wizardMode, type WizardDependencies } from '../src/wizard.js';
@@ -58,7 +59,7 @@ test('fresh wizard selects a folder, installs, prints connection and copies the 
 test('wizard upgrade preserves settings and key and shows installed and executable versions', async () => {
   const state = fixture(['1']); await runWizard(state.dependencies);
   assert.deepEqual(state.installs, [{ yes: true }]); assert.deepEqual(state.copied, [settings.MCP_TOKEN]);
-  for (const text of ['Установлена версия: 1.0.0', 'Версия этого файла: 1.1.0', 'Running', settings.DOCS_ROOT, settings.PUBLIC_URL]) assert.ok(state.output.join('\n').includes(text));
+  for (const text of ['Установлена версия: 1.0.0', `Версия этого файла: ${VERSION}`, 'Running', settings.DOCS_ROOT, settings.PUBLIC_URL]) assert.ok(state.output.join('\n').includes(text));
 });
 
 test('show key copies it without reinstalling or displaying tunnel credentials', async () => {

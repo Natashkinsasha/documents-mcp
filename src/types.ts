@@ -1,6 +1,9 @@
 export type Status = 'ok' | 'partial' | 'error' | 'unsupported';
 export interface Part { label: string; text: string }
-export interface Extraction { parts: Part[]; partial: boolean; reason?: string; unsupported?: boolean }
+export interface Extraction { parts: Part[]; partial: boolean; reason?: string; unsupported?: boolean; ocrDeferred?: boolean }
+/** Reason kept on a document whose scanned pages wait for the recognition pass that follows all other documents. */
+export const EMPTY_FILE = 'Файл пустой (0 байт): в нём нет содержимого.';
+export const OCR_DEFERRED = 'Текст со сканов будет добавлен после обработки остальных документов.';
 export interface DocumentRow {
   path: string;
   size: number;

@@ -2,7 +2,7 @@ import { readFile } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
 import path from 'node:path';
 import { PNG } from 'pngjs';
-import { MAX_TEXT, type Extraction, type Part } from '../types.js';
+import { MAX_TEXT, OCR_DEFERRED, type Extraction, type Part } from '../types.js';
 import type { OcrEngine } from './ocr.js';
 
 interface TextItem { str: string; transform: number[]; width: number; height: number; hasEOL: boolean }
@@ -56,12 +56,12 @@ export function pixelsToPng(image: Pixels): Buffer {
   return PNG.sync.write(png);
 }
 
-export async function extractPdf(file: string, runtime: string, ocr: OcrEngine, maxPages: number): Promise<Extraction> {
+export async function extractPdf(file: string, runtime: string, ocr: OcrEngine, maxPages: number, recognize = true): Promise<Extraction> {
   const library = await import(pathToFileURL(path.join(runtime, 'pdf/index.mjs')).href) as typeof import('unpdf');
   library.registerImageDecoders();
   const document = await library.getDocumentProxy(new Uint8Array(await readFile(file)), { isOffscreenCanvasSupported: false, isImageDecoderSupported: false, maxImageSize: 36_000_000, verbosity: 0 });
   const parts: Part[] = [];
-  let ocrPages = 0; let characters = 0; let partial = false; let reason: string | undefined;
+  let ocrPages = 0; let characters = 0; let partial = false; let reason: string | undefined; let deferred = false;
   try {
     const { OPS } = await import(pathToFileURL(path.join(runtime, 'pdf/pdfjs.mjs')).href);
     for (let number = 1; number <= document.numPages; number++) {
@@ -70,7 +70,8 @@ export async function extractPdf(file: string, runtime: string, ocr: OcrEngine, 
         const content = await page.getTextContent();
         let text = readingOrder(content.items.filter((item) => 'str' in item) as TextItem[]);
         if ((text.match(/\p{L}/gu) ?? []).length < 20) {
-          if (ocrPages >= maxPages) { partial = true; reason = 'Достигнут предел страниц для распознавания.'; }
+          if (!recognize) deferred = true;
+          else if (ocrPages >= maxPages) { partial = true; reason = 'Достигнут предел страниц для распознавания.'; }
           else {
             ocrPages++;
             try {
@@ -97,6 +98,6 @@ export async function extractPdf(file: string, runtime: string, ocr: OcrEngine, 
         if (characters > MAX_TEXT) { partial = true; reason = 'Достигнут предел извлечённого текста.'; break; }
       } finally { page.cleanup(); }
     }
-    return { parts, partial, reason };
+    return deferred ? { parts, partial: true, reason: OCR_DEFERRED, ocrDeferred: true } : { parts, partial, reason };
   } finally { await document.loadingTask.destroy(); }
 }

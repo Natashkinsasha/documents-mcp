@@ -29,6 +29,7 @@ const HELP = `documents-mcp — поиск и чтение документов 
   --tunnel-token <токен>  Свой токен Cloudflare (безопаснее вводить интерактивно)
   --public-url <URL>  Публичный HTTPS-адрес своего туннеля
   --port <число>      Порт (по умолчанию 3000; для адреса Cue задаётся Cue)
+  --index-dir <путь>  Папка индекса (по умолчанию в Windows — documents-mcp-data на диске документов)
   --user <имя>        Пользователь службы Linux; Windows использует SYSTEM
   --yes              Без вопросов; --docs обязателен впервые, без подключения — локально
 
@@ -49,13 +50,13 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
   for (let index = 0; index < args.length; index++) {
     const key = args[index]!;
     if (['--yes', '--purge'].includes(key)) { flags[key] = true; continue; }
-    if (!['--config', '--docs', '--cue-address', '--cue-code', '--tunnel-token', '--public-url', '--port', '--user'].includes(key) || args[index + 1] === undefined) throw new Error('Неизвестный параметр или отсутствует значение. Используйте --help.');
+    if (!['--config', '--docs', '--cue-address', '--cue-code', '--tunnel-token', '--public-url', '--port', '--user', '--index-dir'].includes(key) || args[index + 1] === undefined) throw new Error('Неизвестный параметр или отсутствует значение. Используйте --help.');
     flags[key] = args[++index]!;
   }
   const file = typeof flags['--config'] === 'string' ? flags['--config'] : defaultPaths().config;
   if (['install', 'uninstall'].includes(command) && flags['--config']) throw new Error('Установка и удаление используют стандартный системный файл настроек; --config допустим для run, status и token.');
   if (command === 'install') {
-    const options: InstallOptions = { docs: flags['--docs'] as string | undefined, cueAddress: flags['--cue-address'] as string | undefined, cueCode: flags['--cue-code'] as string | undefined, tunnelToken: flags['--tunnel-token'] as string | undefined, publicUrl: flags['--public-url'] as string | undefined, port: flags['--port'] as string | undefined, user: flags['--user'] as string | undefined, yes: Boolean(flags['--yes']) };
+    const options: InstallOptions = { docs: flags['--docs'] as string | undefined, cueAddress: flags['--cue-address'] as string | undefined, cueCode: flags['--cue-code'] as string | undefined, tunnelToken: flags['--tunnel-token'] as string | undefined, publicUrl: flags['--public-url'] as string | undefined, port: flags['--port'] as string | undefined, user: flags['--user'] as string | undefined, indexDir: flags['--index-dir'] as string | undefined, yes: Boolean(flags['--yes']) };
     await install(options); return;
   }
   if (command === 'uninstall') { await uninstall(Boolean(flags['--purge'])); return; }
