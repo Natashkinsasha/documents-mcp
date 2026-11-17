@@ -18,6 +18,15 @@ export async function ask(question: string, secret = false): Promise<string> {
 
 export const terminalIO: TerminalIO = { ask, print: (message) => console.log(message) };
 
+const SYSTEM_ERRORS: Record<string, string> = {
+  EBUSY: 'файл занят другим процессом', EPERM: 'нет прав или файл занят', EACCES: 'нет доступа', ENOENT: 'файл или папка не найдены',
+  EADDRINUSE: 'порт занят', ENOSPC: 'нет места на диске', EEXIST: 'файл уже существует',
+};
+
 export function commandError(error: unknown): string {
-  return error instanceof Error && !('code' in error) && !(error instanceof SyntaxError) ? error.message : 'Не удалось выполнить команду. Проверьте настройки, права, журнал службы и занятость порта.';
+  if (error instanceof Error && !('code' in error) && !(error instanceof SyntaxError)) return error.message;
+  const generic = 'Не удалось выполнить команду. Проверьте настройки, права, журнал службы и занятость порта.';
+  // Name the system error by its code only: the code carries no paths or credentials, yet tells which step failed.
+  const code = error instanceof Error && 'code' in error && typeof error.code === 'string' && /^[A-Z][A-Z0-9_]{1,31}$/u.test(error.code) ? error.code : undefined;
+  return code ? `${generic} Код ошибки: ${code}${SYSTEM_ERRORS[code] ? ` (${SYSTEM_ERRORS[code]})` : ''}.` : generic;
 }

@@ -2,10 +2,13 @@ import { setImmediate as yieldNow } from 'node:timers/promises';
 import type { Config } from '../config.js';
 import { PathGuard } from '../paths.js';
 import { Extractor } from '../extract/runner.js';
-import { readable } from '../extract/formats.js';
+import { imageExtensions, readable } from '../extract/formats.js';
+import path from 'node:path';
 import { Store } from './store.js';
 import { chunkParts, tokens } from './text.js';
-import { NOT_FOUND, UserError, type DocumentRow, type Logger } from '../types.js';
+import { EMPTY_FILE, NOT_FOUND, OCR_DEFERRED, UserError, type DocumentRow, type Logger } from '../types.js';
+
+const isImage = (file: string): boolean => imageExtensions.has(path.extname(file).toLowerCase());
 import { Trash } from '../trash.js';
 
 export class Indexer {
@@ -87,7 +90,16 @@ export class Indexer {
     this.discovered.clear();
     for (const file of present) this.discovered.add(file);
     for (const row of this.store.all()) if (!present.has(row.path)) this.store.remove(row.path);
+    // Text first: images and scanned PDF pages need recognition, which is far slower, so they wait for a second pass.
+    const recognition: string[] = [];
     for (const file of present) {
+      if (this.stopped) return;
+      if (isImage(file)) { recognition.push(file); continue; }
+      try { await this.ensure(file, { recognize: false }); } catch {}
+      if (this.store.get(file)?.error === OCR_DEFERRED) recognition.push(file);
+      await yieldNow();
+    }
+    for (const file of recognition) {
       if (this.stopped) return;
       try { await this.ensure(file); } catch {}
       await yieldNow();
@@ -96,28 +108,38 @@ export class Indexer {
     this.logger({ level: 'info', message: 'Обход документов завершён.', files: present.size });
   }
 
-  async ensure(file: string): Promise<void> {
+  /** Index the file if it changed. A full request (the default) also recognizes scans that an earlier text-only pass deferred. */
+  async ensure(file: string, options: { recognize?: boolean } = {}): Promise<void> {
+    const recognize = options.recognize !== false;
     if (this.stopped) throw new UserError('Сервер останавливается.');
     const resolved = await this.guard.resolve(file, 'file');
     const relative = resolved.relative;
     this.discovered.add(relative);
     const active = this.jobs.get(relative);
-    if (active) return active;
+    if (active) {
+      // A text-only job in flight does not satisfy a full request: wait for it, then recognize if it deferred scans.
+      if (!recognize) return active;
+      await active.catch(() => {});
+      if (this.store.get(relative)?.error !== OCR_DEFERRED) return active;
+      return this.ensure(file);
+    }
     const row = this.store.get(relative);
-    if (row && row.size === resolved.info.size && row.mtime_ms === resolved.info.mtimeMs) return;
-    const job = this.tail.then(() => this.indexFile(relative));
+    if (row && row.size === resolved.info.size && row.mtime_ms === resolved.info.mtimeMs && !(recognize && row.error === OCR_DEFERRED)) return;
+    const job = this.tail.then(() => this.indexFile(relative, recognize));
     this.jobs.set(relative, job);
     this.tail = job.catch(() => {});
     try { await job; } finally { this.jobs.delete(relative); }
   }
 
-  private async indexFile(file: string): Promise<void> {
+  private async indexFile(file: string, recognize = true): Promise<void> {
     if (this.stopped) return;
     const before = await this.guard.resolve(file, 'file');
     if (!readable(file)) { this.store.put(file, before.info.size, before.info.mtimeMs, 'unsupported', 'Неподдерживаемый тип файла.', []); return; }
+    // An empty file has nothing to read; say so instead of reporting it as damaged.
+    if (before.info.size === 0) { this.store.put(file, 0, before.info.mtimeMs, 'unsupported', EMPTY_FILE, []); return; }
     if (before.info.size > this.config.maxFileBytes) { this.store.put(file, before.info.size, before.info.mtimeMs, 'error', 'Файл слишком большой.', []); return; }
     try {
-      const extracted = await this.extractor.extract(file);
+      const extracted = await this.extractor.extract(file, { recognize });
       const after = await this.guard.resolve(file, 'file');
       if (before.info.size !== after.info.size || before.info.mtimeMs !== after.info.mtimeMs || before.info.ino !== after.info.ino) throw new UserError('Файл изменился во время чтения. Повторите запрос.');
       const chunks = chunkParts(extracted.parts);
@@ -144,7 +166,7 @@ export class Indexer {
 
   async progress() {
     const rows = await this.visibleRows();
-    const counts = { total: 0, ready: 0, pending: 0, partial: 0, failed: 0, unsupported: 0 };
+    const counts = { total: 0, ready: 0, pending: 0, recognition: 0, partial: 0, failed: 0, unsupported: 0 };
     const current = new Map(rows.map((row) => [row.path, row]));
     const visible = new Set<string>();
     for (const file of new Set([...this.discovered, ...current.keys()])) {
@@ -152,7 +174,9 @@ export class Indexer {
         const resolved = await this.guard.resolve(file, 'file');
         visible.add(file);
         const row = current.get(file);
-        if (!row || row.size !== resolved.info.size || row.mtime_ms !== resolved.info.mtimeMs || this.jobs.has(file)) counts.pending++;
+        const stale = !row || row.size !== resolved.info.size || row.mtime_ms !== resolved.info.mtimeMs || this.jobs.has(file);
+        if ((stale && isImage(file)) || (!stale && row!.error === OCR_DEFERRED)) counts.recognition++;
+        else if (stale) counts.pending++;
         else if (row.status === 'ok') counts.ready++;
         else if (row.status === 'partial') counts.partial++;
         else if (row.status === 'error') counts.failed++;

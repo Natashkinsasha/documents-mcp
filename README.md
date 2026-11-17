@@ -13,7 +13,7 @@ A read/write MCP server over an existing document folder. **One executable, one 
 
 Open the downloaded executable again to see the installed version versus this file, task state, documents folder and address. The wizard offers **update**, **show/copy address and key**, **change folder**, **reconnect with a new Cue address/code**, and **uninstall**. Updates, folder changes and reconnects keep the existing MCP key. Uninstall keeps settings and index unless you separately confirm their deletion; source documents are never deleted. The window waits for **«Нажмите Enter, чтобы закрыть окно»**, including on errors.
 
-The program installs under `%ProgramFiles%\documents-mcp`, with config and data under `%ProgramData%\documents-mcp`. ACLs restrict these locations to **SYSTEM and Administrators**. It registers a native Task Scheduler task named `documents-mcp`: a boot trigger, SYSTEM identity, no logged-in user required, no execution time limit, and restart-on-failure every minute (up to 999 consecutive retries). The task always uses `run --config …`, never the wizard.
+The program installs under `%ProgramFiles%\documents-mcp`, with config under `%ProgramData%\documents-mcp`. The index goes to `documents-mcp-data` at the root of the documents drive when that drive is not the one holding `%ProgramData%` (for example `E:\documents-mcp-data` for `E:\Documents`), otherwise to `%ProgramData%\documents-mcp`; `--index-dir <path>` chooses another local folder outside the documents. Upgrades, folder changes and reconnects keep the existing index folder. ACLs restrict these locations to **SYSTEM and Administrators**. It registers a native Task Scheduler task named `documents-mcp`: a boot trigger, SYSTEM identity, no logged-in user required, no execution time limit, and restart-on-failure every minute (up to 999 consecutive retries). The task always uses `run --config …`, never the wizard.
 
 Only **local document folders** are supported. SYSTEM normally has access to local folders, but restricted ACLs still apply. UNC paths and `--user` are rejected; synchronize network documents locally or arrange a domain-account task with your administrator.
 
@@ -47,7 +47,7 @@ Paths:
 | --- | --- |
 | Executable | `/usr/local/bin/documents-mcp` |
 | Config | `/etc/documents-mcp/config.env` |
-| Index and runtime assets | `/var/lib/documents-mcp` |
+| Index and runtime assets | `/var/lib/documents-mcp`, or `--index-dir <path>` |
 | Service | `/etc/systemd/system/documents-mcp.service` |
 
 By default the service runs as the dedicated system user `documents-mcp`, not root. The config is mode `0600`, owned by that service user; root can also read it. The service has read-only filesystem protection, a private temporary directory and explicit `ReadWritePaths` exceptions for its data directory and the documents folder. With `READ_ONLY=1`, documents use `ReadOnlyPaths` instead. Installation and upgrades always regenerate this unit; there is no write-permission question.

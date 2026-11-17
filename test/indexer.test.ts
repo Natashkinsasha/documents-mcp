@@ -1,9 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
-import { writeFile, rm, mkdir, symlink, utimes } from 'node:fs/promises';
+import { writeFile, rm, mkdir, symlink, utimes, copyFile } from 'node:fs/promises';
 import { createApp } from '../src/app.js';
-import { tempProject, docx, spreadsheet, textPdf, cp1251, pptx, resultText } from './helpers.js';
+import { tempProject, docx, spreadsheet, textPdf, cp1251, pptx, resultText, scannedPdf, projectRoot } from './helpers.js';
+import { EMPTY_FILE, OCR_DEFERRED } from '../src/types.js';
 
 test('indexer extracts generated documents, tracks changes/deletions, hides excluded data and survives failures', async (context) => {
   const fixture = await tempProject('indexer');
@@ -66,4 +67,50 @@ test('indexer extracts generated documents, tracks changes/deletions, hides excl
   await writeFile(path.join(fixture.docs, 'on-demand.txt'), 'Изменённый текст');
   await utimes(path.join(fixture.docs, 'on-demand.txt'), new Date(), new Date(Date.now() + 1000));
   assert.match(resultText(await app.tools.call('read_document', { path: 'on-demand.txt' })), /Изменённый текст/u);
+});
+
+test('a scan indexes text first and recognizes images and scanned PDF pages after all other documents', async (context) => {
+  const fixture = await tempProject('recognition-order');
+  const app = await createApp(fixture.config, { logger: () => {} });
+  context.after(async () => { await app.close(); await rm(fixture.directory, { recursive: true, force: true }); });
+  const image = path.join(projectRoot, 'test/fixtures/russian.png');
+  // Names sort the scans first, so a plain walk would recognize them before the text.
+  await copyFile(image, path.join(fixture.docs, 'а-фото.png'));
+  await scannedPdf(path.join(fixture.docs, 'б-скан.pdf'), image);
+  await writeFile(path.join(fixture.docs, 'я-договор.txt'), 'Договор поставки насосов.');
+  const extractor = (app.indexer as unknown as { extractor: { extract(file: string, options?: { recognize?: boolean }): Promise<unknown> } }).extractor;
+  const original = extractor.extract.bind(extractor);
+  const calls: string[] = [];
+  extractor.extract = (file, options) => { calls.push(`${file}:${options?.recognize === false ? 'text' : 'full'}`); return original(file, options); };
+  await app.indexer.rescan();
+  assert.deepEqual(calls, ['б-скан.pdf:text', 'я-договор.txt:text', 'а-фото.png:full', 'б-скан.pdf:full']);
+  assert.equal(app.store.get('а-фото.png')?.status, 'ok');
+  assert.equal(app.store.get('б-скан.pdf')?.status, 'ok', app.store.get('б-скан.pdf')?.error ?? '');
+  assert.notEqual(app.store.get('б-скан.pdf')?.error, OCR_DEFERRED);
+  const status = resultText(await app.tools.call('documents_status', {}));
+  assert.match(status, /Ждут распознавания \(сканы и изображения, после остальных\): 0/u);
+});
+
+test('reading a document whose scans wait for recognition recognizes them at once', async (context) => {
+  const fixture = await tempProject('recognition-on-read');
+  const app = await createApp(fixture.config, { logger: () => {} });
+  context.after(async () => { await app.close(); await rm(fixture.directory, { recursive: true, force: true }); });
+  await scannedPdf(path.join(fixture.docs, 'скан.pdf'), path.join(projectRoot, 'test/fixtures/russian.png'));
+  await app.indexer.ensure('скан.pdf', { recognize: false });
+  assert.equal(app.store.get('скан.pdf')?.error, OCR_DEFERRED);
+  assert.match(resultText(await app.tools.call('documents_status', {})), /Ждут распознавания \(сканы и изображения, после остальных\): 1/u);
+  resultText(await app.tools.call('read_document', { path: 'скан.pdf' }));
+  assert.equal(app.store.get('скан.pdf')?.status, 'ok', app.store.get('скан.pdf')?.error ?? '');
+});
+
+test('an empty file is reported as empty, not as a damaged document', async (context) => {
+  const fixture = await tempProject('empty-file');
+  const app = await createApp(fixture.config, { logger: () => {} });
+  context.after(async () => { await app.close(); await rm(fixture.directory, { recursive: true, force: true }); });
+  await writeFile(path.join(fixture.docs, 'Устав.doc'), '');
+  await app.indexer.rescan();
+  assert.equal(app.store.get('Устав.doc')?.status, 'unsupported');
+  assert.equal(app.store.get('Устав.doc')?.error, EMPTY_FILE);
+  assert.doesNotMatch(resultText(await app.tools.call('documents_status', {})), /Устав\.doc/u);
+  assert.match(resultText(await app.tools.call('read_document', { path: 'Устав.doc' })), /Файл пустой/u);
 });

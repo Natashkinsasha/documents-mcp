@@ -4,7 +4,7 @@ import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import type { Indexer } from './index/indexer.js';
 import { excerpt, renderChunks } from './index/text.js';
 import { readable } from './extract/formats.js';
-import { UserError, type Logger } from './types.js';
+import { EMPTY_FILE, UserError, type Logger } from './types.js';
 import { Mutations, writeInfo, writeSchemas, type WriteToolName } from './mutations.js';
 import { writeAccess } from './write-formats.js';
 
@@ -117,6 +117,7 @@ export class Tools {
         const row = this.indexer.store.get(relative);
         let mark = '';
         if (!readable(name)) mark = ' — не читается: неподдерживаемый тип';
+        else if (current.info.size === 0) mark = ' — пустой файл (0 байт)';
         else if (current.info.size > this.indexer.config.maxFileBytes) mark = ' — не читается: слишком большой файл';
         else if (!row || row.size !== current.info.size || row.mtime_ms !== current.info.mtimeMs) mark = ' — ещё не проиндексирован';
         else if (row.status === 'error') mark = ` — не читается: ${row.error}`;
@@ -146,7 +147,7 @@ export class Tools {
     const row = this.indexer.store.get(file.relative);
     if (!row) throw new UserError('Документ ещё обрабатывается. Повторите запрос через несколько минут.');
     if (row.size !== current.info.size || row.mtime_ms !== current.info.mtimeMs) throw new UserError('Документ изменился и ещё обрабатывается. Повторите запрос через несколько минут.');
-    if (row.status === 'unsupported') throw new UserError('Этот тип файла не поддерживается для чтения.');
+    if (row.status === 'unsupported') throw new UserError(row.error === EMPTY_FILE ? EMPTY_FILE : 'Этот тип файла не поддерживается для чтения.');
     if (row.status === 'error') throw new UserError(row.error ?? 'Не удалось прочитать документ.');
     const text = renderChunks(this.indexer.store.chunks(file.relative));
     if (input.offset > text.length) throw new UserError(`Смещение выходит за пределы документа. Всего символов: ${text.length}.`);
@@ -160,7 +161,7 @@ export class Tools {
   private async status(): Promise<string> {
     const progress = await this.indexer.progress();
     const output = [
-      `Всего файлов: ${progress.total}`, `Готово: ${progress.ready}`, `Ожидают: ${progress.pending}`,
+      `Всего файлов: ${progress.total}`, `Готово: ${progress.ready}`, `Ожидают: ${progress.pending}`, `Ждут распознавания (сканы и изображения, после остальных): ${progress.recognition}`,
       `Прочитаны частично: ${progress.partial}`, `Ошибки: ${progress.failed}`, `Неподдерживаемые: ${progress.unsupported}`,
       `Индексация идёт: ${progress.scanning ? 'да' : 'нет'}`,
       `Последний завершённый обход: ${this.indexer.lastScan ?? 'ещё не завершён'}`,

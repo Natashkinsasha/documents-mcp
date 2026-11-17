@@ -36,7 +36,8 @@ export class Extractor {
     return worker;
   }
 
-  async extract(relative: string): Promise<Extraction> {
+  /** `recognize: false` reads text layers only and marks scans and images for a later recognition pass. */
+  async extract(relative: string, options: { recognize?: boolean } = {}): Promise<Extraction> {
     if (this.stopping) throw new UserError('Сервер останавливается.');
     const directory = await mkdtemp(path.join(os.tmpdir(), 'documents-mcp-'));
     try {
@@ -64,7 +65,7 @@ export class Extractor {
         const id = ++this.sequence;
         const timer = setTimeout(() => { void worker.terminate(); }, 10 * 60_000);
         this.pending.set(id, { resolve, reject, timer });
-        worker.postMessage({ id, file: snapshot });
+        worker.postMessage({ id, file: snapshot, recognize: options.recognize !== false });
       });
     } finally { await rm(directory, { recursive: true, force: true }); }
   }

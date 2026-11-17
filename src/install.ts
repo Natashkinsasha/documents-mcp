@@ -11,13 +11,20 @@ import { claimCue } from './cue.js';
 import { terminalIO, type TerminalIO } from './terminal.js';
 import { VERSION } from './version.js';
 
-export interface InstallOptions extends ConnectionOptions { docs?: string; user?: string }
+export interface InstallOptions extends ConnectionOptions { docs?: string; user?: string; indexDir?: string }
+
+/** Where a new installation keeps its index: on Windows, next to the documents when they live on another drive than the system data folder, so a large index does not fill the system drive. */
+export function defaultIndexDir(docs: string | undefined, paths: InstallPaths, platform: NodeJS.Platform = process.platform): string {
+  if (platform !== 'win32' || !docs || !path.win32.isAbsolute(docs) || docs.startsWith('\\\\')) return paths.data;
+  const drive = path.win32.parse(docs).root;
+  return drive.toLowerCase() === path.win32.parse(paths.data).root.toLowerCase() ? paths.data : path.win32.join(drive, 'documents-mcp-data');
+}
 export function documentAclFix(user: string, docs: string, readOnly = false): string {
   const permission = readOnly ? 'rX' : 'rwX';
   const quoted = `'${docs.replaceAll("'", "'\\''")}'`;
   return `setfacl -R -m u:${user}:${permission} ${quoted}; setfacl -R -d -m u:${user}:${permission} ${quoted}`;
 }
-export function upgradeSettings(previous: NodeJS.ProcessEnv, options: InstallOptions, paths: InstallPaths): NodeJS.ProcessEnv {
+export function upgradeSettings(previous: NodeJS.ProcessEnv, options: InstallOptions, paths: InstallPaths, platform: NodeJS.Platform = process.platform): NodeJS.ProcessEnv {
   const settings = { ...previous };
   settings.DOCS_ROOT = options.docs ?? settings.DOCS_ROOT;
   settings.TUNNEL_TOKEN = options.tunnelToken ?? settings.TUNNEL_TOKEN ?? '';
@@ -25,11 +32,26 @@ export function upgradeSettings(previous: NodeJS.ProcessEnv, options: InstallOpt
   settings.PORT = options.port ?? settings.PORT ?? '3000';
   settings.SERVICE_USER = options.user ?? settings.SERVICE_USER ?? 'documents-mcp';
   settings.MCP_TOKEN ||= randomBytes(32).toString('hex');
-  settings.INDEX_DIR = paths.data;
+  settings.INDEX_DIR = options.indexDir ?? settings.INDEX_DIR ?? defaultIndexDir(settings.DOCS_ROOT, paths, platform);
   settings.HOST = '127.0.0.1';
   settings.INSTALLED_VERSION = VERSION;
   if (process.env.READ_ONLY !== undefined) settings.READ_ONLY = process.env.READ_ONLY;
   return settings;
+}
+
+const busy = (error: unknown): boolean => error instanceof Error && 'code' in error && ['EBUSY', 'EPERM', 'EACCES'].includes(String(error.code));
+
+/** Retry an action while Windows reports its file as locked; after `forceAfterMs`, ask `force` to end the holder once. */
+export async function whileBusy(action: () => Promise<unknown>, force: () => Promise<unknown>, { timeoutMs = 30_000, forceAfterMs = 10_000, stepMs = 500 } = {}): Promise<void> {
+  const start = Date.now(); let forced = false;
+  for (;;) {
+    try { await action(); return; }
+    catch (error) {
+      if (!busy(error) || Date.now() - start >= timeoutMs) throw error;
+      if (!forced && Date.now() - start >= forceAfterMs) { forced = true; await force(); }
+      await delay(stepMs);
+    }
+  }
 }
 
 export async function waitForHealth(url: string, timeoutMs = 60_000): Promise<boolean> {
@@ -67,7 +89,7 @@ export async function install(input: InstallOptions, overrides: Partial<InstallD
   if (!options.yes) {
     options.docs ??= await dependencies.io.ask(`Папка документов${previous.DOCS_ROOT ? ` [${previous.DOCS_ROOT}]` : ''}: `) || previous.DOCS_ROOT;
   }
-  const settings = upgradeSettings(previous, options, paths);
+  const settings = upgradeSettings(previous, options, paths, dependencies.platform);
   await dependencies.deploy(settings, options, previous, paths);
   if (!await dependencies.health(`http://127.0.0.1:${settings.PORT}/healthz`)) throw new Error('Служба установлена, но не ответила за 60 секунд. Проверьте status и журнал службы.');
   if (settings.PUBLIC_URL) {
@@ -86,13 +108,16 @@ async function deployInstallation(settings: NodeJS.ProcessEnv, options: InstallO
   if (!(await stat(docs)).isDirectory()) throw new Error('Указанный путь не является папкой.');
   await access(docs, constants.R_OK | constants.X_OK);
   settings.DOCS_ROOT = docs;
+  const indexDir = settings.INDEX_DIR ?? paths.data;
+  if (!path.isAbsolute(indexDir) || indexDir.startsWith('\\\\')) throw new Error('Папка индекса должна быть локальной абсолютной папкой: --index-dir <путь>.');
   if (process.platform === 'win32' && (options.user || docs.startsWith('\\\\'))) throw new Error('Задача запускается от SYSTEM. Сетевые папки UNC и --user не поддерживаются: выберите локальную папку или настройте отдельную задачу с доменной учётной записью вручную.');
   await mkdir(paths.data, { recursive: true, mode: 0o700 });
+  await mkdir(indexDir, { recursive: true, mode: 0o700 });
   await loadConfig(settings);
   let identity: { uid: number; gid: number } | undefined;
   if (process.platform === 'linux') {
     const user = settings.SERVICE_USER!;
-    systemdUnit(paths, docs, user, settings.READ_ONLY === '1');
+    systemdUnit(paths, docs, user, settings.READ_ONLY === '1', indexDir);
     try { await execute('id', ['-u', user]); }
     catch {
       if (options.user || previous.SERVICE_USER) throw new Error('Пользователь службы не существует. Создайте его или измените --user.');
@@ -107,15 +132,17 @@ async function deployInstallation(settings: NodeJS.ProcessEnv, options: InstallO
       throw new Error(`Пользователю ${user} нужны чтение, проход${settings.READ_ONLY === '1' ? '' : ' и запись'}. Выполните: ${documentAclFix(user, docs, settings.READ_ONLY === '1')}; для каждого родительского каталога — setfacl -m u:${user}:x <каталог>. Либо укажите --user <существующий пользователь с доступом>.`);
     }
     await execute('chown', ['-R', '--no-dereference', `${identity.uid}:${identity.gid}`, paths.data]);
+    if (indexDir !== paths.data) await execute('chown', ['-R', '--no-dereference', `${identity.uid}:${identity.gid}`, indexDir]);
   }
   await mkdir(path.dirname(paths.config), { recursive: true, mode: 0o700 });
   await mkdir(path.dirname(paths.binary), { recursive: true });
-  if (process.platform === 'win32') { await restrictWindows(paths.data); await restrictWindows(path.dirname(paths.binary)); }
+  if (process.platform === 'win32') { await restrictWindows(paths.data); if (indexDir !== paths.data) await restrictWindows(indexDir); await restrictWindows(path.dirname(paths.binary)); }
   await serviceAction('stop', paths).catch(() => {});
   if (path.resolve(process.execPath) !== path.resolve(paths.binary)) {
     const stagedBinary = `${paths.binary}.new`;
     await copyFile(process.execPath, stagedBinary); await chmod(stagedBinary, 0o755);
-    if (process.platform === 'win32') await rm(paths.binary, { force: true });
+    // schtasks /End returns before the old process exits, and Windows keeps a running executable locked.
+    if (process.platform === 'win32') await whileBusy(() => rm(paths.binary, { force: true }), () => execute('taskkill.exe', ['/F', '/T', '/IM', path.win32.basename(paths.binary)], { windowsHide: true }).catch(() => {}));
     await rename(stagedBinary, paths.binary);
   }
   const stagedConfig = `${paths.config}.new`;
@@ -124,7 +151,7 @@ async function deployInstallation(settings: NodeJS.ProcessEnv, options: InstallO
   if (process.platform === 'win32') await rm(paths.config, { force: true });
   await rename(stagedConfig, paths.config); await chmod(paths.config, 0o600);
   if (process.platform === 'linux') {
-    await writeSystemdUnit(paths, docs, settings.SERVICE_USER!, settings.READ_ONLY === '1');
+    await writeSystemdUnit(paths, docs, settings.SERVICE_USER!, settings.READ_ONLY === '1', indexDir);
     await execute('systemctl', ['daemon-reload']);
   } else {
     await writeFile(paths.service, Buffer.from(`\ufeff${windowsTask(paths)}`, 'utf16le'));
@@ -136,6 +163,7 @@ async function deployInstallation(settings: NodeJS.ProcessEnv, options: InstallO
 export async function uninstall(purge: boolean): Promise<void> {
   await requireAdministrator();
   const paths = defaultPaths();
+  const indexDir = (await readConfigFile(paths.config, true)).INDEX_DIR;
   await serviceAction('stop', paths).catch(() => {});
   await serviceAction('remove', paths);
   await rm(paths.service, { force: true });
@@ -145,6 +173,9 @@ export async function uninstall(purge: boolean): Promise<void> {
     const { spawn } = await import('node:child_process');
     const child = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { env: { ...process.env, DOCUMENTS_MCP_REMOVE: paths.binary }, detached: true, stdio: 'ignore', windowsHide: true }); child.unref();
   } else await rm(paths.binary, { force: true });
-  if (purge) { await rm(paths.config, { force: true }); await rm(paths.data, { recursive: true, force: true }); }
+  if (purge) {
+    await rm(paths.config, { force: true }); await rm(paths.data, { recursive: true, force: true });
+    if (indexDir && path.isAbsolute(indexDir) && path.resolve(indexDir) !== path.resolve(paths.data)) await rm(indexDir, { recursive: true, force: true });
+  }
   console.log(purge ? 'Служба, программа, настройки и индекс удалены.' : 'Служба и программа удалены. Настройки и индекс сохранены.');
 }
