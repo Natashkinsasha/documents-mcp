@@ -73,7 +73,9 @@ export async function runWizard(overrides: Partial<WizardDependencies> = {}): Pr
     secrets = [status.settings.TUNNEL_TOKEN ?? ''];
     if (!status.installed) {
       io.print('Добро пожаловать! Подключим папку документов к Cue.');
-      const settings = await dependencies.installer({ docs: await folder(status.settings.DOCS_ROOT) });
+      const docs = await folder(status.settings.DOCS_ROOT);
+      const allowRemoteUpdate = /^(да|д|yes|y)$/iu.test((await io.ask('Разрешить Cue удалённо устанавливать новые официальные версии с проверенной подписью? Программа сможет обновлять себя с правами SYSTEM. По умолчанию выключено. [да/Нет]: ')).trim());
+      const settings = await dependencies.installer({ docs, allowRemoteUpdate });
       await copy(settings);
       return;
     }

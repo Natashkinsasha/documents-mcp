@@ -221,6 +221,7 @@ The config uses literal `KEY=value` lines, or `KEY="JSON-escaped value"` as gene
 | `OCR_MAX_PAGES` | `300` | Maximum scanned PDF pages OCRed per document |
 | `IGNORE` | empty | Comma-separated relative globs, e.g. `**/archive/**,**/*.bak` |
 | `READ_ONLY` | unset (writing enabled) | Optional `1` hides all seven write/trash tools and disables trash purge; other values leave writing enabled |
+| `REMOTE_UPDATE` | `0` (disabled) | `1` explicitly allows remotely triggered, signed Windows x64 updates; independent of `READ_ONLY` |
 | `SERVICE_USER` | `documents-mcp` | Saved Linux installer account; change with `install --user` |
 
 Dotfiles/directories, `~$*`, `Thumbs.db`, `desktop.ini` and `node_modules` are hidden. Ignore rules apply to both requested paths and symlink targets; a directory match hides descendants. Tool paths use `/`, never absolute paths or Windows backslashes. Escaping symlinks and traversal are rejected.
@@ -262,7 +263,113 @@ The build verifies each official Node archive/executable against that version's 
 
 At first start, assets are verified and extracted under `<INDEX_DIR>/runtime/<version>-<manifest content hash>/`, with private directories and files. Existing assets are SHA-256 checked and reused; corrupted assets are replaced from the executable and old version directories removed. The main process and extraction workers do not need the source tree or an installed `node_modules` directory.
 
-Cloudflared **2026.11.0** and the four download SHA-256 values are pinned together in `scripts/binary-versions.json`. To bump: inspect the official `cloudflare/cloudflared` GitHub release, download its four named assets, independently compute SHA-256 (the Darwin hash covers the `.tgz`), update the version/hashes in that one file, rebuild all targets, and rerun binary verification. The builder rejects checksum mismatches, including corrupted cache entries. Bump Node in the same file after confirming LTS support and rerun all tests. No runtime self-update is performed.
+Cloudflared **2026.11.0** and the four download SHA-256 values are pinned together in `scripts/binary-versions.json`. To bump: inspect the official `cloudflare/cloudflared` GitHub release, download its four named assets, independently compute SHA-256 (the Darwin hash covers the `.tgz`), update the version/hashes in that one file, rebuild all targets, and rerun binary verification. The builder rejects checksum mismatches, including corrupted cache entries. Bump Node in the same file after confirming LTS support and rerun all tests. Cloudflared does not self-update separately.
+
+## Signed remote updates (Windows x64 only, since 1.5.0)
+
+Remote update is **off by default**. An Administrator can opt in with
+`documents-mcp.exe install --allow-remote-update` or answer the explicit question
+in the first-install Windows wizard. This saves `REMOTE_UPDATE=1` in the protected
+`config.env`. Ordinary upgrades preserve the existing value and never enable it
+implicitly. To revoke consent, set `REMOTE_UPDATE=0` and restart the service.
+Read-only document access is independent of update consent. Linux, macOS and
+non-x64 Windows report `supported:false`; their service privileges do not permit
+this update mechanism. Version 1.4.0 must first be upgraded locally to 1.5.0.
+
+`GET /control/update` returns `supported`, `allowed`, `current`, `available`,
+`state`, `target`, `received`, `size`, and `error`. The state is `idle`, `checking`,
+`downloading`, `verifying`, `installing`, or `failed`. Availability is checked in
+the background, at most once per hour (including failed checks); GET never waits
+for GitHub. `POST /control/update` has **no body and no query parameters**. It
+returns 202, also for a duplicate request while work is running, 403/`disabled`
+without consent, or 409/`unsupported` on other platforms. These routes use the
+same bearer authentication, refusal of any Origin header, 64-request limit and
+`{error,code}` failures as other control routes. `/control/status` is unchanged;
+there is no update MCP tool. No cabinet button is included in this change.
+
+### Trust and download
+
+The caller cannot choose a URL, version, path, hash, command or arguments. The
+only download origin is
+`https://github.com/Natashkinsasha/documents-mcp/releases/latest/download/`.
+Redirects are manual, bounded, HTTPS-only, and restricted to `github.com` and
+subdomains of `githubusercontent.com`. The MCP token is never sent to GitHub.
+The pinned Ed25519 SPKI key lives in `src/update-public-key.json`. The detached
+base64 signature is verified over **exact manifest bytes before JSON parsing**.
+The strict schema accepts only a stable `x.y.z` version newer than the running
+version and the fixed Windows asset name, bounded size, and SHA-256. Prereleases
+and build metadata are deliberately not accepted in this first version.
+
+Downloads stream into the protected system data directory's `update/` child,
+never the served documents or a separately configured index folder. There is
+no whole-download timeout: headers and each network read have a 60-second
+deadline, so a download at 40 KB/s may take over an hour. Eight attempts use
+exponential backoff up to 60 seconds, Range, strict Content-Range/length checks,
+and on-disk progress. Every attempt re-fetches the signed manifest; changed
+manifest bytes discard the partial download. A crash is reported as
+`failed`/`interrupted`; a new POST resumes the retained partial file, with a fresh
+signature check. A SHA-256/size failure discards it. Disk headroom includes the
+download, staging, backup, and a 64 MiB margin. Files on a separate executable
+volume can still fail during staging; that failure must not stop the service.
+
+### SYSTEM apply and rollback
+
+A private SQLite transaction supplies the OS-released cross-process mutex;
+operational state and availability are atomically written JSON, not a database
+record. Only after verification is a separate SYSTEM task `documents-mcp-update`
+registered. Its sole command is the verified `candidate.exe apply-update`, with
+no parameters. It is independent of the service task, uses IgnoreNew, and keeps
+a boot trigger and bounded failure retries until completion for crash recovery.
+The internal command requires Administrator privileges, its fixed candidate
+location, the stored signature, matching embedded version, and its own file hash.
+
+It saves the previous executable and exact config, stages the new executable,
+stops the service, swaps the binary, changes only `INSTALLED_VERSION`, starts the
+service, and requires both loopback `/healthz` and authenticated
+`/control/status.version` to confirm the new version, plus a private startup
+receipt from the new live process after it successfully binds the HTTP port
+(not just a potentially spoofed loopback HTTP response). A swap/start failure records
+`install`; a failed health/version check records `health`. Both restore the old
+binary and config and start the service. An interrupted apply rolls back on the
+helper's next scheduled run. A failed rollback retains its journal and backups
+for recovery; do not delete these files before investigating. After completion
+the task and temporary files are removed, leaving `<binary>.previous`. Windows
+cannot delete a running helper executable, so the service retries its cleanup
+every five seconds after the helper exits.
+
+This is SYSTEM-level execution: token leakage or a compromised Cue may trigger
+only a newer signed official release, not arbitrary code. It can still cause
+bandwidth use and service restarts. The signing key and release/build pipeline
+are therefore critical trust roots; a malicious signed release is trusted.
+Local Administrators/SYSTEM, writable/reparse-point system directories, and an
+already compromised service process are outside the remote-token threat model.
+Keep ProgramData/Program Files ACLs restricted to SYSTEM/Administrators. The
+mechanism is not Authenticode, does not revoke historical signatures, and cannot
+prevent freezing the latest-release endpoint or blocking updates. The initial
+pinned key has no automatic rotation/revocation path.
+Do not run a privileged manual install/uninstall concurrently with a remote
+update; the remote-job mutex does not coordinate the legacy local installer.
+
+### Release signing
+
+After building all release executables, run `node scripts/sign-release.mjs` in a
+trusted release environment. Supply the Ed25519 private-key PEM in
+`DOCUMENTS_MCP_SIGNING_KEY` or through stdin from your secret manager. Never put
+the private key in the repository, a command-line argument, logs or release
+assets. The script streams the Windows executable from `release/`, uses the
+package version, signs the manifest, verifies against the **same pinned public
+key**, and only then writes `release/update-manifest.json` and
+`release/update-manifest.json.sig`. A wrong key fails without writing these
+assets. Publish both alongside `documents-mcp-win-x64.exe` from that exact build;
+publish the complete release before marking it latest. Do not edit manifest bytes
+after signing. Tests use only ephemeral generated keys, never the release key.
+
+Before relying on this feature, exercise a **real Windows Server** installation:
+SYSTEM ACL inheritance, task registration/security/boot recovery, independent
+helper survival after `/End` and taskkill, locked executable rename retries,
+antivirus interference, both disk volumes, interrupted power, rollback and
+authenticated version health checks. Dependency-injected tests on macOS do not
+establish these operating-system guarantees.
 
 ## Docker alternative
 
