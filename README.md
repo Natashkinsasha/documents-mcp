@@ -119,6 +119,19 @@ Retrieve the saved values later with `sudo documents-mcp token`, or `documents-m
 
 The original four tools keep `readOnlyHint: true`, non-destructive, idempotent, closed-world annotations. All seven additional tools have `readOnlyHint: false` and `openWorldHint: false`; only `create_folder` is idempotent, and all mutation tools except `create_folder` are destructive (`list_trash` is non-destructive). An MCP client may offer only read-only tools in unattended runs, so writes happen in conversations with a person. No resources or prompts are exposed. `/healthz` returns only `ok`, without credentials or document details.
 
+### Indexing control HTTP API
+
+These endpoints let a client such as Cue show and manage indexing. They are not MCP tools, so agents cannot call them: the tool list, tool descriptions, server instructions and `documents_status` text are unchanged. They use the same `Authorization: Bearer <MCP_TOKEN>`, refuse any request with an `Origin` header, and accept JSON bodies up to 4 KiB.
+
+| Request | Effect |
+| --- | --- |
+| `GET /control/status` | Returns `version`, `paused`, `recognitionPaused`, `scanning`, `lastScanAt`, `scanFailed`, `counts` (`total`, `processed`, `ready`, `pending`, `recognition`, `partial`, `failed`, `unsupported`), up to 20 `failures` (`path`, `error`) and `failuresTruncated` |
+| `POST /control/indexing` with `{"paused": true}` or `false` | Pauses or resumes background indexing and returns the status |
+| `POST /control/recognition` with `{"paused": true}` or `false` | Defers or resumes background recognition of images and scanned pages and returns the status |
+| `POST /control/rescan` | Returns `202` and checks the folder now. While paused it only finds new and deleted files. A request during a pass runs one more pass afterwards |
+
+Pauses limit only background work: the file being processed finishes, and a document an agent asks for is still read at once, including recognition. Resuming starts a pass. Both switches are stored in `indexing-controls.json` in the index directory, survive restarts and index rebuilds; a damaged file is ignored with a warning.
+
 ### Read-only file browser HTTP API
 
 Two additional read-only HTTP endpoints let a client such as Cue show expandable folders and preview original files. They are not MCP tools: the tool list, tool descriptions and server instructions are unchanged. They use the same `Authorization: Bearer <MCP_TOKEN>`, refuse any request with an `Origin` header (browser requests), answer only `GET`, send `Cache-Control: no-store` and `X-Content-Type-Options: nosniff`, and share the `/mcp` limit of 64 concurrent requests; at most 4 file downloads are buffered at once. `READ_ONLY=1` does not change them, and they never write, index or touch the trash.

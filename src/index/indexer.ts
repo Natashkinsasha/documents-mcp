@@ -5,6 +5,7 @@ import { Extractor } from '../extract/runner.js';
 import { imageExtensions, readable } from '../extract/formats.js';
 import path from 'node:path';
 import { Store } from './store.js';
+import { IndexControls } from './controls.js';
 import { chunkParts, tokens } from './text.js';
 import { EMPTY_FILE, NOT_FOUND, OCR_DEFERRED, UserError, type DocumentRow, type Logger } from '../types.js';
 
@@ -22,8 +23,33 @@ export class Indexer {
   private timer: NodeJS.Timeout | undefined;
   private stopped = false;
   private changes: Promise<unknown> = Promise.resolve();
+  private rescanAgain = false;
+  private readonly controls: IndexControls;
 
-  constructor(readonly config: Config, readonly guard: PathGuard, readonly store: Store, private readonly extractor: Extractor, private readonly logger: Logger, readonly trash = new Trash(guard)) {}
+  constructor(readonly config: Config, readonly guard: PathGuard, readonly store: Store, private readonly extractor: Extractor, private readonly logger: Logger, readonly trash = new Trash(guard)) {
+    this.controls = new IndexControls(path.join(config.indexDir, 'indexing-controls.json'), logger);
+  }
+
+  get paused(): boolean { return this.controls.paused; }
+  get recognitionPaused(): boolean { return this.controls.recognitionPaused; }
+
+  setPaused(paused: boolean): void {
+    if (paused === this.paused) return;
+    this.controls.update({ paused });
+    if (!paused) this.requestRescan();
+  }
+
+  setRecognitionPaused(recognitionPaused: boolean): void {
+    if (recognitionPaused === this.recognitionPaused) return;
+    this.controls.update({ recognitionPaused });
+    if (!recognitionPaused) this.requestRescan();
+  }
+
+  /** A request during a pass runs one more pass afterwards, so changes seen too late are not lost. */
+  requestRescan(): void {
+    if (this.scanPromise) this.rescanAgain = true;
+    else void this.rescan();
+  }
 
   exclusive<Result>(action: () => Promise<Result>): Promise<Result> {
     const operation = this.changes.then(action);
@@ -75,7 +101,11 @@ export class Indexer {
     this.scanPromise = this.exclusive(() => this.scan()).catch(() => {
       this.scanFailed = true;
       this.logger({ level: 'warn', message: 'Обход документов не завершён; существующий индекс сохранён.' });
-    }).finally(() => { this.scanning = false; this.scanPromise = undefined; });
+    }).finally(() => {
+      this.scanning = false;
+      this.scanPromise = undefined;
+      if (this.rescanAgain) { this.rescanAgain = false; void this.rescan(); }
+    });
     return this.scanPromise;
   }
 
@@ -90,17 +120,20 @@ export class Indexer {
     this.discovered.clear();
     for (const file of present) this.discovered.add(file);
     for (const row of this.store.all()) if (!present.has(row.path)) this.store.remove(row.path);
+    // Pauses limit only this background pass: ensure() still serves any file an agent asks for.
+    if (this.paused) return;
     // Text first: images and scanned PDF pages need recognition, which is far slower, so they wait for a second pass.
     const recognition: string[] = [];
     for (const file of present) {
-      if (this.stopped) return;
+      if (this.stopped || this.paused) return;
       if (isImage(file)) { recognition.push(file); continue; }
       try { await this.ensure(file, { recognize: false }); } catch {}
       if (this.store.get(file)?.error === OCR_DEFERRED) recognition.push(file);
       await yieldNow();
     }
     for (const file of recognition) {
-      if (this.stopped) return;
+      if (this.stopped || this.paused) return;
+      if (this.recognitionPaused) break;
       try { await this.ensure(file); } catch {}
       await yieldNow();
     }
@@ -184,7 +217,8 @@ export class Indexer {
       } catch {}
     }
     counts.total = visible.size;
-    return { ...counts, processed: counts.ready + counts.partial + counts.failed + counts.unsupported, failures: rows.filter((row) => row.status === 'error').slice(0, 20), scanning: this.scanning || this.jobs.size > 0 };
+    const failures = rows.filter((row) => row.status === 'error');
+    return { ...counts, processed: counts.ready + counts.partial + counts.failed + counts.unsupported, failures: failures.slice(0, 20), failureTotal: failures.length, scanning: this.scanning || this.jobs.size > 0 };
   }
 
   async close(): Promise<void> {
