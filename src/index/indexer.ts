@@ -7,7 +7,7 @@ import path from 'node:path';
 import { Store } from './store.js';
 import { IndexControls } from './controls.js';
 import { chunkParts, tokens } from './text.js';
-import { EMPTY_FILE, NOT_FOUND, OCR_DEFERRED, UserError, type Logger } from '../types.js';
+import { EMPTY_FILE, NOT_FOUND, OCR_DEFERRED, UserError, type DocumentRow, type Logger } from '../types.js';
 
 const isImage = (file: string): boolean => imageExtensions.has(path.extname(file).toLowerCase());
 /** Below Node's four file-system threads, so that counting never makes folder listings and reads queue behind it. */
