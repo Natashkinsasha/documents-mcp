@@ -8,6 +8,7 @@ import { log } from './types.js';
 import { VERSION } from './version.js';
 import { launchWindowsWizard, wizardMode } from './wizard.js';
 import { commandError } from './terminal.js';
+import { applyUpdate } from './update-apply.js';
 
 const HELP = `documents-mcp — поиск и чтение документов через MCP
 
@@ -32,6 +33,7 @@ const HELP = `documents-mcp — поиск и чтение документов 
   --index-dir <путь>  Папка индекса (по умолчанию в Windows — documents-mcp-data на диске документов)
   --user <имя>        Пользователь службы Linux; Windows использует SYSTEM
   --yes              Без вопросов; --docs обязателен впервые, без подключения — локально
+  --allow-remote-update  Разрешить удалённую установку подписанных обновлений (Windows)
 
 CUE_URL — адрес кабинета для активации (по умолчанию https://app.cuechat.org).
 Для Windows: скачайте exe и откройте двойным щелчком — запустится мастер.
@@ -41,6 +43,10 @@ CUE_URL — адрес кабинета для активации (по умол
 export async function main(args = process.argv.slice(2)): Promise<void> {
   process.umask(0o077);
   if (args[0] === '--') args.shift();
+  if (args[0] === 'apply-update') {
+    if (args.length !== 1) throw new Error('Внутренняя команда не принимает параметры.');
+    await applyUpdate(defaultPaths()); return;
+  }
   if (wizardMode(args, process.platform, Boolean(process.stdin.isTTY))) { await launchWindowsWizard(); return; }
   if (args.includes('--help')) { console.log(HELP); return; }
   if (args.includes('--version')) { console.log(`documents-mcp ${VERSION}`); return; }
@@ -49,7 +55,7 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
   const flags: Record<string, string | boolean> = {};
   for (let index = 0; index < args.length; index++) {
     const key = args[index]!;
-    if (['--yes', '--purge'].includes(key)) { flags[key] = true; continue; }
+    if (['--yes', '--purge', '--allow-remote-update'].includes(key)) { flags[key] = true; continue; }
     if (!['--config', '--docs', '--cue-address', '--cue-code', '--tunnel-token', '--public-url', '--port', '--user', '--index-dir'].includes(key) || args[index + 1] === undefined) throw new Error('Неизвестный параметр или отсутствует значение. Используйте --help.');
     flags[key] = args[++index]!;
   }
@@ -57,6 +63,7 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
   if (['install', 'uninstall'].includes(command) && flags['--config']) throw new Error('Установка и удаление используют стандартный системный файл настроек; --config допустим для run, status и token.');
   if (command === 'install') {
     const options: InstallOptions = { docs: flags['--docs'] as string | undefined, cueAddress: flags['--cue-address'] as string | undefined, cueCode: flags['--cue-code'] as string | undefined, tunnelToken: flags['--tunnel-token'] as string | undefined, publicUrl: flags['--public-url'] as string | undefined, port: flags['--port'] as string | undefined, user: flags['--user'] as string | undefined, indexDir: flags['--index-dir'] as string | undefined, yes: Boolean(flags['--yes']) };
+    options.allowRemoteUpdate = Boolean(flags['--allow-remote-update']);
     await install(options); return;
   }
   if (command === 'uninstall') { await uninstall(Boolean(flags['--purge'])); return; }

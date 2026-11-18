@@ -49,10 +49,11 @@ test('elevation checks high integrity SID rather than localized group names', as
 test('fresh wizard selects a folder, installs, prints connection and copies the key, then waits', async () => {
   const state = fixture([], false);
   await runWizard(state.dependencies);
-  assert.deepEqual(state.installs, [{ docs: 'C:\\Новая папка' }]); assert.deepEqual(state.copied, [settings.MCP_TOKEN]);
+  assert.deepEqual(state.installs, [{ docs: 'C:\\Новая папка', allowRemoteUpdate: false }]); assert.deepEqual(state.copied, [settings.MCP_TOKEN]);
   assert.match(state.output.join('\n'), /Добро пожаловать/u); assert.match(state.output.join('\n'), /Ключ скопирован/u);
   assert.ok(state.output.join('\n').includes(`Ключ для Cue: ${settings.MCP_TOKEN}`));
-  assert.deepEqual(state.questions, ['Нажмите Enter, чтобы закрыть окно']);
+  assert.match(state.questions[0]!, /SYSTEM.*По умолчанию выключено/u);
+  assert.equal(state.questions[1], 'Нажмите Enter, чтобы закрыть окно');
   assert.ok(!state.output.join('\n').includes(settings.TUNNEL_TOKEN));
 });
 
@@ -95,8 +96,13 @@ test('picker failure and cancel fall back to a typed path', async () => {
   for (const failure of [true, false]) {
     const state = fixture(['C:\\Введённая папка'], false);
     state.dependencies.picker = async () => { if (failure) throw new Error('picker unavailable'); return ''; };
-    await runWizard(state.dependencies); assert.deepEqual(state.installs, [{ docs: 'C:\\Введённая папка' }]);
+    await runWizard(state.dependencies); assert.deepEqual(state.installs, [{ docs: 'C:\\Введённая папка', allowRemoteUpdate: false }]);
   }
+});
+
+test('fresh wizard enables remote update only after explicit consent', async () => {
+  const state = fixture(['да'], false); await runWizard(state.dependencies);
+  assert.equal(state.installs[0]?.allowRemoteUpdate, true);
 });
 
 test('errors stay in Russian without a stack, redact credentials and wait for Enter', async () => {

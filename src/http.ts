@@ -9,6 +9,8 @@ import { MAX_TEXT, type Logger } from './types.js';
 import { BROWSE_MESSAGES, BrowseError, Browser, browseQuery, type BrowseCode } from './browse.js';
 import { PathGuard } from './paths.js';
 import { Control, controlSwitch, parseFailuresQuery } from './control.js';
+import { RemoteUpdate } from './update.js';
+import { UpdateError } from './update-manifest.js';
 
 export const BODY_LIMIT = MAX_TEXT * 6 + 100_000;
 function rpcError(response: ServerResponse, status: number, message: string, code = -32600): void {
@@ -23,7 +25,7 @@ function browseError(response: ServerResponse, status: number, code: BrowseCode,
 
 export const BROWSE_FILE_CONCURRENCY = 4;
 const BROWSE_ROUTES = new Set(['/browse/files', '/browse/file']);
-const CONTROL_ROUTES = new Map([['/control/status', 'GET'], ['/control/failures', 'GET'], ['/control/indexing', 'POST'], ['/control/recognition', 'POST'], ['/control/rescan', 'POST']]);
+const CONTROL_ROUTES = new Map([['/control/status', 'GET'], ['/control/failures', 'GET'], ['/control/indexing', 'POST'], ['/control/recognition', 'POST'], ['/control/rescan', 'POST'], ['/control/update', 'GET, POST']]);
 const CONTROL_BODY_LIMIT = 4096;
 
 export function authorized(header: string | undefined, token: string): boolean {
@@ -66,7 +68,7 @@ async function body(request: IncomingMessage, limit = BODY_LIMIT): Promise<unkno
   });
 }
 
-export function createHttpServer(config: Config, tools: Tools, logger: Logger, browser = new Browser(new PathGuard(config.docsRoot, config.ignore), config), control?: Control) {
+export function createHttpServer(config: Config, tools: Tools, logger: Logger, browser = new Browser(new PathGuard(config.docsRoot, config.ignore), config), control?: Control, updater?: RemoteUpdate) {
   let active = 0;
   let reading = 0;
   const server = createServer({ maxHeaderSize: 16 * 1024, requestTimeout: 15_000, headersTimeout: 10_000 }, (request, response) => {
@@ -118,7 +120,7 @@ export function createHttpServer(config: Config, tools: Tools, logger: Logger, b
     const controlMethod = control && CONTROL_ROUTES.get(route!);
     if (control && controlMethod) {
       if (!authorized(request.headers.authorization, config.token)) { response.setHeader('WWW-Authenticate', 'Bearer'); browseError(response, 401, 'invalid_request', 'Требуется действительный токен доступа.'); request.resume(); return; }
-      if (request.method !== controlMethod) { response.setHeader('Allow', controlMethod); browseError(response, 405, 'invalid_request', `Метод не поддерживается. Используйте ${controlMethod}.`); request.resume(); return; }
+      if (!controlMethod.split(', ').includes(request.method ?? '')) { response.setHeader('Allow', controlMethod); browseError(response, 405, 'invalid_request', `Метод не поддерживается. Используйте ${controlMethod}.`); request.resume(); return; }
       if (request.headers.origin !== undefined) { browseError(response, 403, 'invalid_request', 'Запросы из браузера не разрешены.'); request.resume(); return; }
       if (Number(request.headers['content-length'] ?? 0) > CONTROL_BODY_LIMIT) { browseError(response, 413, 'invalid_request'); request.resume(); return; }
       if (active >= 64) { response.setHeader('Retry-After', '1'); browseError(response, 429, 'unavailable', 'Слишком много запросов. Повторите позже.'); request.resume(); return; }
@@ -129,7 +131,14 @@ export function createHttpServer(config: Config, tools: Tools, logger: Logger, b
       const send = (status: number, value: unknown) => { response.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' }); response.end(JSON.stringify(value)); };
       void (async () => {
         try {
-          if (route === '/control/status') { request.resume(); send(200, await control.status()); }
+          if (route === '/control/update') {
+            if ((request.url ?? '').includes('?')) { request.resume(); browseError(response, 400, 'invalid_request'); return; }
+            if (request.method === 'POST' && (request.headers['transfer-encoding'] !== undefined || Number(request.headers['content-length'] ?? 0) !== 0)) { request.resume(); browseError(response, 400, 'invalid_request'); return; }
+            request.resume();
+            const update = updater ?? new RemoteUpdate(Boolean(config.remoteUpdate));
+            send(request.method === 'POST' ? 202 : 200, await (request.method === 'POST' ? update.start() : update.status()));
+          }
+          else if (route === '/control/status') { request.resume(); send(200, await control.status()); }
           else if (route === '/control/failures') { request.resume(); const { offset, limit } = parseFailuresQuery(request.url ?? ''); send(200, await control.failures(offset, limit)); }
           else if (route === '/control/rescan') { request.resume(); control.rescan(); send(202, { accepted: true }); }
           else {
@@ -138,7 +147,8 @@ export function createHttpServer(config: Config, tools: Tools, logger: Logger, b
           }
         } catch (error) {
           if (response.headersSent || response.destroyed) { if (!response.writableEnded) response.destroy(); return; }
-          if (error instanceof RangeError) browseError(response, 413, 'invalid_request');
+          if (error instanceof UpdateError) send(error.code === 'disabled' ? 403 : error.code === 'unsupported' ? 409 : 503, { error: 'Не удалось запустить обновление.', code: error.code });
+          else if (error instanceof RangeError) browseError(response, 413, 'invalid_request');
           else if (error instanceof SyntaxError || error instanceof ZodError) browseError(response, 400, 'invalid_request');
           else browseError(response, 503, 'unavailable');
         } finally { if (response.writableEnded || response.destroyed) release(); }

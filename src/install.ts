@@ -11,7 +11,7 @@ import { claimCue } from './cue.js';
 import { terminalIO, type TerminalIO } from './terminal.js';
 import { VERSION } from './version.js';
 
-export interface InstallOptions extends ConnectionOptions { docs?: string; user?: string; indexDir?: string }
+export interface InstallOptions extends ConnectionOptions { docs?: string; user?: string; indexDir?: string; allowRemoteUpdate?: boolean }
 
 /** Where a new installation keeps its index: on Windows, next to the documents when they live on another drive than the system data folder, so a large index does not fill the system drive. */
 export function defaultIndexDir(docs: string | undefined, paths: InstallPaths, platform: NodeJS.Platform = process.platform): string {
@@ -35,6 +35,7 @@ export function upgradeSettings(previous: NodeJS.ProcessEnv, options: InstallOpt
   settings.INDEX_DIR = options.indexDir ?? settings.INDEX_DIR ?? defaultIndexDir(settings.DOCS_ROOT, paths, platform);
   settings.HOST = '127.0.0.1';
   settings.INSTALLED_VERSION = VERSION;
+  settings.REMOTE_UPDATE = options.allowRemoteUpdate ? '1' : previous.REMOTE_UPDATE ?? '0';
   if (process.env.READ_ONLY !== undefined) settings.READ_ONLY = process.env.READ_ONLY;
   return settings;
 }
