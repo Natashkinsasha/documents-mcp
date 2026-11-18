@@ -13,8 +13,9 @@ import { log, type Logger } from './types.js';
 import { prepareRuntime } from './runtime.js';
 import { TunnelSupervisor } from './tunnel.js';
 import { Trash } from './trash.js';
+import { RemoteUpdate } from './update.js';
 
-export async function createApp(config: Config, options: { logger?: Logger; readWaitMs?: number; now?: () => number } = {}) {
+export async function createApp(config: Config, options: { logger?: Logger; readWaitMs?: number; now?: () => number; updater?: RemoteUpdate } = {}) {
   const logger = options.logger ?? log;
   const runtime = await prepareRuntime(config.indexDir);
   if (config.tunnelToken) await access(path.join(runtime, process.platform === 'win32' ? 'cloudflared.exe' : 'cloudflared')).catch(() => { throw new Error('Встроенный cloudflared отсутствует. При запуске из исходников сначала выполните pnpm build.'); });
@@ -23,7 +24,9 @@ export async function createApp(config: Config, options: { logger?: Logger; read
   const extractor = new Extractor(guard, runtime, config.ocrLangs, config.maxFileBytes, config.ocrMaxPages);
   const indexer = new Indexer(config, guard, store, extractor, logger, new Trash(guard, options.now));
   const tools = new Tools(indexer, options.readWaitMs, logger);
-  const http = createHttpServer(config, tools, logger, new Browser(guard, config), new Control(indexer));
+  const updater = options.updater ?? new RemoteUpdate(Boolean(config.remoteUpdate), { docsRoot: config.docsRoot, indexDir: config.indexDir });
+  await updater.initialize();
+  const http = createHttpServer(config, tools, logger, new Browser(guard, config), new Control(indexer), updater);
   const tunnel = config.tunnelToken ? new TunnelSupervisor(path.join(runtime, process.platform === 'win32' ? 'cloudflared.exe' : 'cloudflared'), config.tunnelToken, logger) : undefined;
   let closed = false;
   return {
@@ -33,6 +36,7 @@ export async function createApp(config: Config, options: { logger?: Logger; read
         http.once('error', reject);
         http.listen(config.port, config.host, () => { http.removeListener('error', reject); resolve(); });
       });
+      await updater.confirmRunning();
       indexer.start();
       tunnel?.start();
       logger({ level: 'info', message: 'HTTP-сервер запущен.', port: config.port });
@@ -41,6 +45,7 @@ export async function createApp(config: Config, options: { logger?: Logger; read
       if (closed) return;
       closed = true;
       const stopping = new Promise<void>((resolve) => { http.close(() => resolve()); http.closeAllConnections(); });
+      await updater.close();
       await tunnel?.stop();
       await indexer.close();
       await stopping;

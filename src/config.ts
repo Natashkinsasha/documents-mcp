@@ -5,7 +5,7 @@ import os from 'node:os';
 export interface Config {
   docsRoot: string; indexDir: string; token: string; port: number; host: string;
   ocrLangs: string[]; rescanMinutes: number; maxFileBytes: number; ocrMaxPages: number; ignore: string[];
-  tunnelToken: string; publicUrl: string; readOnly?: boolean;
+  tunnelToken: string; publicUrl: string; readOnly?: boolean; remoteUpdate?: boolean;
 }
 
 export function defaultPaths(platform: NodeJS.Platform = process.platform, env = process.env) {
@@ -91,7 +91,7 @@ export async function loadConfig(env: NodeJS.ProcessEnv = process.env): Promise<
   const host = tunnelToken ? '127.0.0.1' : env.HOST ?? '127.0.0.1';
   if (!host || /[\s/\0]/u.test(host)) throw new Error('HOST: укажите корректный адрес или имя сервера.');
   return {
-    docsRoot, indexDir, token, host, ocrLangs: [...new Set(ocrLangs)], tunnelToken, publicUrl: normalizePublicUrl(env.PUBLIC_URL ?? ''), readOnly: env.READ_ONLY === '1',
+    docsRoot, indexDir, token, host, ocrLangs: [...new Set(ocrLangs)], tunnelToken, publicUrl: normalizePublicUrl(env.PUBLIC_URL ?? ''), readOnly: env.READ_ONLY === '1', remoteUpdate: env.REMOTE_UPDATE === '1',
     port: numberSetting(env, 'PORT', 3000, 65535),
     rescanMinutes: numberSetting(env, 'RESCAN_MINUTES', 10, 525600, false),
     maxFileBytes: numberSetting(env, 'MAX_FILE_MB', 100, 1024, false) * 1024 * 1024,
