@@ -70,6 +70,6 @@ test('real SDK HTTP client: authentication, tools, search/read paging, Russian i
   app.indexer.ensure = async (file) => { await new Promise((resolve) => setTimeout(resolve, 50)); await ensure(file); completed = true; };
   const quickTools = new Tools(app.indexer, 5);
   const timed = await quickTools.call('read_document', { path: 'Договор.txt' });
-  assert.equal(timed.isError, true); assert.match(resultText(timed), /ещё обрабатывается/u);
+  assert.equal(timed.isError, undefined); assert.match(resultText(timed), /Состояние: обрабатывается/u);
   await new Promise((resolve) => setTimeout(resolve, 80)); assert.equal(completed, true);
 });

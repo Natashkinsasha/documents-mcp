@@ -1,8 +1,10 @@
 import { DatabaseSync } from 'node:sqlite';
 import { chmodSync } from 'node:fs';
-import type { Chunk, DocumentRow, Status } from '../types.js';
+import { OCR_DEFERRED, type Chunk, type DocumentRow, type Status } from '../types.js';
 import { buildQuery, renderChunks, tokens } from './text.js';
 
+/** A scanned page of one file version; `text` is null until it is recognized. */
+export interface RecognitionPage { page: number; text: string | null }
 export interface Hit { path: string; label: string; text: string; mtime_ms: number; rank: number }
 
 export class Store {
@@ -24,6 +26,10 @@ export class Store {
         seq INTEGER NOT NULL, label TEXT NOT NULL, text TEXT NOT NULL, UNIQUE(path, seq)
       );
       CREATE VIRTUAL TABLE IF NOT EXISTS chunk_fts USING fts5(name_tokens, body_tokens, tokenize='unicode61');
+      CREATE TABLE IF NOT EXISTS recognition_pages (
+        path TEXT NOT NULL, size INTEGER NOT NULL, mtime_ms REAL NOT NULL, page INTEGER NOT NULL, text TEXT,
+        PRIMARY KEY (path, page)
+      ) WITHOUT ROWID;
     `);
   }
 
@@ -43,7 +49,18 @@ export class Store {
   }
   chunks(path: string): Chunk[] { return this.db.prepare('SELECT seq, label, text FROM chunks WHERE path = ? ORDER BY seq').all(path) as unknown as Chunk[]; }
 
-  put(path: string, size: number, mtime: number, status: Status, error: string | null, chunks: Chunk[], bodies?: string[]): void {
+  recognitionPages(path: string, size: number, mtime: number): RecognitionPage[] {
+    return this.db.prepare('SELECT page, text FROM recognition_pages WHERE path = ? AND size = ? AND mtime_ms = ? ORDER BY page').all(path, size, mtime) as unknown as RecognitionPage[];
+  }
+
+  /** Keeps one recognized page, so an interrupted run of a long scan resumes after it. */
+  saveRecognizedPage(path: string, size: number, mtime: number, page: number, text: string): void {
+    this.db.prepare(`INSERT INTO recognition_pages (path, size, mtime_ms, page, text) VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT (path, page) DO UPDATE SET size = excluded.size, mtime_ms = excluded.mtime_ms, text = excluded.text`).run(path, size, mtime, page, text);
+  }
+
+  /** `scanPages` lists the pages still to recognize of a document left waiting for recognition. */
+  put(path: string, size: number, mtime: number, status: Status, error: string | null, chunks: Chunk[], bodies?: string[], scanPages: number[] = []): void {
     const prepared = chunks.map((chunk, index) => ({ ...chunk, body: bodies?.[index] ?? tokens(chunk.text).join(' ') }));
     const name = tokens(path).join(' ');
     this.db.exec('BEGIN IMMEDIATE');
@@ -60,6 +77,11 @@ export class Store {
         const result = insert.run(path, 0, '', '');
         fts.run(result.lastInsertRowid, name, '');
       }
+      if (error === OCR_DEFERRED) {
+        this.db.prepare('DELETE FROM recognition_pages WHERE path = ? AND (size <> ? OR mtime_ms <> ?)').run(path, size, mtime);
+        const page = this.db.prepare('INSERT OR IGNORE INTO recognition_pages (path, size, mtime_ms, page) VALUES (?, ?, ?, ?)');
+        for (const number of scanPages) page.run(path, size, mtime, number);
+      } else this.db.prepare('DELETE FROM recognition_pages WHERE path = ?').run(path);
       this.db.exec('COMMIT');
     } catch (error) { this.db.exec('ROLLBACK'); throw error; }
   }
@@ -71,7 +93,11 @@ export class Store {
 
   remove(path: string): void {
     this.db.exec('BEGIN IMMEDIATE');
-    try { this.removeInside(path); this.db.exec('COMMIT'); }
+    try {
+      this.removeInside(path);
+      this.db.prepare('DELETE FROM recognition_pages WHERE path = ?').run(path);
+      this.db.exec('COMMIT');
+    }
     catch (error) { this.db.exec('ROLLBACK'); throw error; }
   }
 

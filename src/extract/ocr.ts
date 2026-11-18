@@ -1,6 +1,6 @@
 import { createWorker, OEM, type Worker } from 'tesseract.js';
 import path from 'node:path';
-import { UserError } from '../types.js';
+import { InterruptedError, OCR_TIMEOUT, UserError } from '../types.js';
 
 export class OcrEngine {
   private worker: Promise<Worker> | undefined;
@@ -9,7 +9,7 @@ export class OcrEngine {
   async recognize(image: Uint8Array): Promise<string> {
     if (this.stopped) throw new UserError('Распознавание остановлено.');
     let timer: NodeJS.Timeout | undefined;
-    const deadline = new Promise<never>((_resolve, reject) => { timer = setTimeout(() => { const worker = this.worker; this.worker = undefined; void worker?.then((worker) => worker.terminate()).catch(() => {}); reject(new UserError('Превышено время распознавания изображения.')); }, this.timeoutMs); });
+    const deadline = new Promise<never>((_resolve, reject) => { timer = setTimeout(() => { const worker = this.worker; this.worker = undefined; void worker?.then((worker) => worker.terminate()).catch(() => {}); reject(new InterruptedError(OCR_TIMEOUT)); }, this.timeoutMs); });
     const run = async () => {
       this.worker ??= createWorker(this.langs, OEM.LSTM_ONLY, {
         workerPath: path.join(this.runtime, 'tesseract-worker.cjs'),
