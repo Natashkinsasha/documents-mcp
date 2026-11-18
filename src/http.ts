@@ -8,7 +8,7 @@ import type { Tools } from './tools.js';
 import { MAX_TEXT, type Logger } from './types.js';
 import { BROWSE_MESSAGES, BrowseError, Browser, browseQuery, type BrowseCode } from './browse.js';
 import { PathGuard } from './paths.js';
-import { Control, controlSwitch } from './control.js';
+import { Control, controlSwitch, parseFailuresQuery } from './control.js';
 
 export const BODY_LIMIT = MAX_TEXT * 6 + 100_000;
 function rpcError(response: ServerResponse, status: number, message: string, code = -32600): void {
@@ -23,7 +23,7 @@ function browseError(response: ServerResponse, status: number, code: BrowseCode,
 
 export const BROWSE_FILE_CONCURRENCY = 4;
 const BROWSE_ROUTES = new Set(['/browse/files', '/browse/file']);
-const CONTROL_ROUTES = new Map([['/control/status', 'GET'], ['/control/indexing', 'POST'], ['/control/recognition', 'POST'], ['/control/rescan', 'POST']]);
+const CONTROL_ROUTES = new Map([['/control/status', 'GET'], ['/control/failures', 'GET'], ['/control/indexing', 'POST'], ['/control/recognition', 'POST'], ['/control/rescan', 'POST']]);
 const CONTROL_BODY_LIMIT = 4096;
 
 export function authorized(header: string | undefined, token: string): boolean {
@@ -130,6 +130,7 @@ export function createHttpServer(config: Config, tools: Tools, logger: Logger, b
       void (async () => {
         try {
           if (route === '/control/status') { request.resume(); send(200, await control.status()); }
+          else if (route === '/control/failures') { request.resume(); const { offset, limit } = parseFailuresQuery(request.url ?? ''); send(200, await control.failures(offset, limit)); }
           else if (route === '/control/rescan') { request.resume(); control.rescan(); send(202, { accepted: true }); }
           else {
             const { paused } = controlSwitch.parse(await body(request, CONTROL_BODY_LIMIT));

@@ -30,6 +30,12 @@ export class Store {
   get(path: string): DocumentRow | undefined { return this.db.prepare('SELECT * FROM documents WHERE path = ?').get(path) as unknown as DocumentRow | undefined; }
   /** Only what a status needs: on a large index this is far lighter than all(). */
   summaries(): Pick<DocumentRow, 'path' | 'status' | 'error'>[] { return this.db.prepare('SELECT path, status, error FROM documents ORDER BY path').all() as unknown as Pick<DocumentRow, 'path' | 'status' | 'error'>[]; }
+  /** One page of the files that could not be read, in path order, and how many there are in all. */
+  failures(offset: number, limit: number): { rows: Pick<DocumentRow, 'path' | 'error'>[]; total: number } {
+    const rows = this.db.prepare("SELECT path, error FROM documents WHERE status = 'error' ORDER BY path LIMIT ? OFFSET ?").all(limit, offset) as unknown as Pick<DocumentRow, 'path' | 'error'>[];
+    const { total } = this.db.prepare("SELECT COUNT(*) AS total FROM documents WHERE status = 'error'").get() as unknown as { total: number };
+    return { rows, total };
+  }
   all(): DocumentRow[] { return this.db.prepare('SELECT * FROM documents ORDER BY path').all() as unknown as DocumentRow[]; }
   /** Documents in the index, and those among them with nothing left to do (`waiting` marks the rest). */
   indexedCounts(waiting: string): { documents: number; processed: number } {

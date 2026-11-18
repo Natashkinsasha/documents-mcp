@@ -240,6 +240,16 @@ export class Indexer {
    * and checking every file took over a minute on a folder of 120,000. Changed and deleted files
    * are noticed by the next pass, as the search results already are.
    */
+  /** One page of failed files. A file gone or hidden since the last pass is left out; the offsets stay those of the index. */
+  async failurePage(offset: number, limit: number) {
+    const { rows, total } = this.store.failures(offset, limit);
+    const failures: typeof rows = [];
+    for (const row of rows) {
+      try { await this.guard.resolve(row.path, 'file'); failures.push(row); } catch {}
+    }
+    return { failures, total, nextOffset: rows.length === limit && offset + limit < total ? offset + limit : null };
+  }
+
   async quickProgress() {
     const counts = { total: 0, ready: 0, pending: 0, recognition: 0, partial: 0, failed: 0, unsupported: 0 };
     const rows = this.store.summaries();

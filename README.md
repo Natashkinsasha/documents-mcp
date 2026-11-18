@@ -126,6 +126,7 @@ These endpoints let a client such as Cue show and manage indexing. They are not 
 | Request | Effect |
 | --- | --- |
 | `GET /control/status` | Returns `version`, `paused`, `recognitionPaused`, `scanning`, `lastScanAt`, `scanFailed`, `counts` (`total`, `processed`, `ready`, `pending`, `recognition`, `partial`, `failed`, `unsupported`), up to 20 `failures` (`path`, `error`) and `failuresTruncated` |
+| `GET /control/failures?offset=<n>&limit=<1-50>` | Returns one page of files that could not be read, in path order: `failures` (`path`, `error`), `total` and `nextOffset` (`null` on the last page). `offset` defaults to `0`, `limit` to `20`. A file deleted or hidden since the last scan is left out of its page |
 | `POST /control/indexing` with `{"paused": true}` or `false` | Pauses or resumes background indexing and returns the status |
 | `POST /control/recognition` with `{"paused": true}` or `false` | Defers or resumes background recognition of images and scanned pages and returns the status |
 | `POST /control/rescan` | Returns `202` and checks the folder now. While paused it only finds new and deleted files. A request during a pass runs one more pass afterwards |
