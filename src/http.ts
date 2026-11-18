@@ -1,12 +1,14 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { createHash, timingSafeEqual } from 'node:crypto';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+import { ZodError } from 'zod';
 import type { Config } from './config.js';
 import { createMcpServer } from './mcp.js';
 import type { Tools } from './tools.js';
 import { MAX_TEXT, type Logger } from './types.js';
 import { BROWSE_MESSAGES, BrowseError, Browser, browseQuery, type BrowseCode } from './browse.js';
 import { PathGuard } from './paths.js';
+import { Control, controlSwitch } from './control.js';
 
 export const BODY_LIMIT = MAX_TEXT * 6 + 100_000;
 function rpcError(response: ServerResponse, status: number, message: string, code = -32600): void {
@@ -21,6 +23,8 @@ function browseError(response: ServerResponse, status: number, code: BrowseCode,
 
 export const BROWSE_FILE_CONCURRENCY = 4;
 const BROWSE_ROUTES = new Set(['/browse/files', '/browse/file']);
+const CONTROL_ROUTES = new Map([['/control/status', 'GET'], ['/control/indexing', 'POST'], ['/control/recognition', 'POST'], ['/control/rescan', 'POST']]);
+const CONTROL_BODY_LIMIT = 4096;
 
 export function authorized(header: string | undefined, token: string): boolean {
   const expected = createHash('sha256').update(token).digest();
@@ -29,7 +33,7 @@ export function authorized(header: string | undefined, token: string): boolean {
   return timingSafeEqual(expected, supplied) && match !== null;
 }
 
-async function body(request: IncomingMessage): Promise<unknown> {
+async function body(request: IncomingMessage, limit = BODY_LIMIT): Promise<unknown> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
     let length = 0;
@@ -49,7 +53,7 @@ async function body(request: IncomingMessage): Promise<unknown> {
     };
     const data = (bytes: Buffer) => {
       length += bytes.length;
-      if (length > BODY_LIMIT) finish(new RangeError('body limit'));
+      if (length > limit) finish(new RangeError('body limit'));
       else chunks.push(bytes);
     };
     const end = () => finish();
@@ -62,7 +66,7 @@ async function body(request: IncomingMessage): Promise<unknown> {
   });
 }
 
-export function createHttpServer(config: Config, tools: Tools, logger: Logger, browser = new Browser(new PathGuard(config.docsRoot, config.ignore), config)) {
+export function createHttpServer(config: Config, tools: Tools, logger: Logger, browser = new Browser(new PathGuard(config.docsRoot, config.ignore), config), control?: Control) {
   let active = 0;
   let reading = 0;
   const server = createServer({ maxHeaderSize: 16 * 1024, requestTimeout: 15_000, headersTimeout: 10_000 }, (request, response) => {
@@ -106,6 +110,35 @@ export function createHttpServer(config: Config, tools: Tools, logger: Logger, b
         } catch (error) {
           if (response.headersSent || response.destroyed) { if (!response.writableEnded) response.destroy(); return; }
           if (error instanceof BrowseError) browseError(response, error.status, error.code, error.message);
+          else browseError(response, 503, 'unavailable');
+        } finally { if (response.writableEnded || response.destroyed) release(); }
+      })();
+      return;
+    }
+    const controlMethod = control && CONTROL_ROUTES.get(route!);
+    if (control && controlMethod) {
+      if (!authorized(request.headers.authorization, config.token)) { response.setHeader('WWW-Authenticate', 'Bearer'); browseError(response, 401, 'invalid_request', 'Требуется действительный токен доступа.'); request.resume(); return; }
+      if (request.method !== controlMethod) { response.setHeader('Allow', controlMethod); browseError(response, 405, 'invalid_request', `Метод не поддерживается. Используйте ${controlMethod}.`); request.resume(); return; }
+      if (request.headers.origin !== undefined) { browseError(response, 403, 'invalid_request', 'Запросы из браузера не разрешены.'); request.resume(); return; }
+      if (Number(request.headers['content-length'] ?? 0) > CONTROL_BODY_LIMIT) { browseError(response, 413, 'invalid_request'); request.resume(); return; }
+      if (active >= 64) { response.setHeader('Retry-After', '1'); browseError(response, 429, 'unavailable', 'Слишком много запросов. Повторите позже.'); request.resume(); return; }
+      active++;
+      let released = false;
+      const release = () => { if (!released) { released = true; active--; } };
+      response.once('close', release);
+      const send = (status: number, value: unknown) => { response.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' }); response.end(JSON.stringify(value)); };
+      void (async () => {
+        try {
+          if (route === '/control/status') { request.resume(); send(200, await control.status()); }
+          else if (route === '/control/rescan') { request.resume(); control.rescan(); send(202, { accepted: true }); }
+          else {
+            const { paused } = controlSwitch.parse(await body(request, CONTROL_BODY_LIMIT));
+            send(200, await (route === '/control/indexing' ? control.setIndexingPaused(paused) : control.setRecognitionPaused(paused)));
+          }
+        } catch (error) {
+          if (response.headersSent || response.destroyed) { if (!response.writableEnded) response.destroy(); return; }
+          if (error instanceof RangeError) browseError(response, 413, 'invalid_request');
+          else if (error instanceof SyntaxError || error instanceof ZodError) browseError(response, 400, 'invalid_request');
           else browseError(response, 503, 'unavailable');
         } finally { if (response.writableEnded || response.destroyed) release(); }
       })();
