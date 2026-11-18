@@ -2,7 +2,6 @@ import { test, type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
 import { rm, stat, writeFile } from 'node:fs/promises';
-import { setImmediate as nextTurn } from 'node:timers/promises';
 import { createApp } from '../src/app.js';
 import { OCR_DEFERRED } from '../src/types.js';
 import { resultText, tempProject } from './helpers.js';
@@ -33,22 +32,9 @@ test('a search checks only the files it returns, even while indexing goes on', a
   assert.equal(resolve.mock.callCount(), 2);
 });
 
-test('progress checks each file once, a few at a time, and concurrent readers share the pass', async (context) => {
-  const { app } = await indexedApp(context, 'progress-pass');
-  const guard = app.indexer.guard;
-  const original = guard.resolve.bind(guard);
-  let active = 0;
-  let peak = 0;
-  const resolve = context.mock.method(guard, 'resolve', async (...args: Parameters<typeof original>) => {
-    peak = Math.max(peak, ++active);
-    await nextTurn();
-    try { return await original(...args); } finally { active--; }
-  });
-  const [first, second] = await Promise.all([app.indexer.progress(), app.indexer.progress()]);
-  assert.equal(first.ready, 8);
-  assert.deepEqual(second, first);
-  assert.equal(resolve.mock.callCount(), 8);
-  assert.equal(peak, 3);
-  await app.indexer.progress();
-  assert.equal(resolve.mock.callCount(), 16);
+test('the status tool answers from the index without checking each file on disk', async (context) => {
+  const { app } = await indexedApp(context, 'status-from-index');
+  const resolve = context.mock.method(app.indexer.guard, 'resolve');
+  assert.match(resultText(await app.tools.call('documents_status', {})), /Всего файлов: 8\nГотово: 8/u);
+  assert.equal(resolve.mock.callCount(), 0);
 });

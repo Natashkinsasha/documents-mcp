@@ -4,7 +4,7 @@ import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import type { Indexer } from './index/indexer.js';
 import { excerpt, renderChunks } from './index/text.js';
 import { readable } from './extract/formats.js';
-import { EMPTY_FILE, UserError, type Logger } from './types.js';
+import { EMPTY_FILE, NOT_FOUND, UserError, type Logger } from './types.js';
 import { Mutations, writeInfo, writeSchemas, type WriteToolName } from './mutations.js';
 import { writeAccess } from './write-formats.js';
 
@@ -71,7 +71,23 @@ export class Tools {
       if (tool === 'list_folder') return toolText(await this.list(schemas.list_folder.parse(parsed.data)));
       if (tool === 'read_document') return toolText(await this.read(schemas.read_document.parse(parsed.data)));
       return toolText(await this.status());
-    } catch (error) { return toolText(error instanceof UserError ? error.message : 'Не удалось выполнить действие. Повторите запрос позже.', true); }
+    } catch (error) {
+      if (error instanceof UserError && error.message === NOT_FOUND && !Object.hasOwn(writeSchemas, tool)) return toolText(await this.notFound((parsed.data as { path?: string; folder?: string })), true);
+      return toolText(error instanceof UserError ? error.message : 'Не удалось выполнить действие. Повторите запрос позже.', true);
+    }
+  }
+
+  /** The refusal with the way forward, so that a slightly wrong path costs one more call and not a search of the archive. */
+  private async notFound(input: { path?: string; folder?: string }): Promise<string> {
+    const hint = await this.indexer.guard.suggest(input.path ?? input.folder ?? '').catch(() => null);
+    if (!hint || !hint.existing && !hint.matches.length) return NOT_FOUND;
+    const output = [NOT_FOUND];
+    if (hint.existing) output.push(`Существующая часть пути: ${hint.existing}/`);
+    if (hint.matches.length) {
+      output.push('Похожие пути:');
+      for (const match of hint.matches) output.push(`- ${match.path}${match.directory ? '/ — папка' : ' — файл'}${match.complete ? '' : ', остаток запрошенного пути в ней не найден'}`);
+    } else output.push('Посмотрите эту папку через list_folder или найдите документ через search_documents.');
+    return output.join('\n');
   }
 
   private async search(input: z.infer<typeof schemas.search_documents>): Promise<string> {
@@ -159,7 +175,7 @@ export class Tools {
   }
 
   private async status(): Promise<string> {
-    const progress = await this.indexer.progress();
+    const progress = await this.indexer.quickProgress();
     const output = [
       `Всего файлов: ${progress.total}`, `Готово: ${progress.ready}`, `Ожидают: ${progress.pending}`, `Ждут распознавания (сканы и изображения, после остальных): ${progress.recognition}`,
       `Прочитаны частично: ${progress.partial}`, `Ошибки: ${progress.failed}`, `Неподдерживаемые: ${progress.unsupported}`,

@@ -13,6 +13,7 @@ import { log, type Logger } from './types.js';
 import { prepareRuntime } from './runtime.js';
 import { TunnelSupervisor } from './tunnel.js';
 import { Trash } from './trash.js';
+import { watchStalls } from './stall.js';
 
 export async function createApp(config: Config, options: { logger?: Logger; readWaitMs?: number; now?: () => number } = {}) {
   const logger = options.logger ?? log;
@@ -26,6 +27,7 @@ export async function createApp(config: Config, options: { logger?: Logger; read
   const http = createHttpServer(config, tools, logger, new Browser(guard, config), new Control(indexer));
   const tunnel = config.tunnelToken ? new TunnelSupervisor(path.join(runtime, process.platform === 'win32' ? 'cloudflared.exe' : 'cloudflared'), config.tunnelToken, logger) : undefined;
   let closed = false;
+  let stopWatchingStalls: (() => void) | undefined;
   return {
     indexer, tools, http, store,
     async start() {
@@ -33,6 +35,7 @@ export async function createApp(config: Config, options: { logger?: Logger; read
         http.once('error', reject);
         http.listen(config.port, config.host, () => { http.removeListener('error', reject); resolve(); });
       });
+      stopWatchingStalls = watchStalls(logger, { indexing: () => indexer.scanning });
       indexer.start();
       tunnel?.start();
       logger({ level: 'info', message: 'HTTP-сервер запущен.', port: config.port });
@@ -40,6 +43,7 @@ export async function createApp(config: Config, options: { logger?: Logger; read
     async close() {
       if (closed) return;
       closed = true;
+      stopWatchingStalls?.();
       const stopping = new Promise<void>((resolve) => { http.close(() => resolve()); http.closeAllConnections(); });
       await tunnel?.stop();
       await indexer.close();

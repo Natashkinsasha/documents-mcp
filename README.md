@@ -108,7 +108,7 @@ Retrieve the saved values later with `sudo documents-mcp token`, or `documents-m
 | `search_documents` | Stemmed Russian/English search, optional folder, ranked documents and excerpts |
 | `list_folder` | Visible files and folders, readability and indexing status |
 | `read_document` | Text with page/sheet labels and character-offset paging |
-| `documents_status` | Index progress, partial documents and failures |
+| `documents_status` | Index progress, partial documents and failures, counted from the index without checking each file; changes on disk appear after the next pass |
 | `create_folder` | `path`; creates intermediate folders, idempotent for existing folders |
 | `write_document` | `path`, `content`, optional `overwrite=false`, `expected_modified`, `replace_office=false` |
 | `edit_document` | `path`, required `expected_modified`, 1–50 `edits: [{old_text, new_text, replace_all?}]` |
@@ -284,6 +284,7 @@ Use the same Cloudflare service URL **`http://localhost:3000`**, since the embed
 - **Windows:** inspect Task Scheduler → `documents-mcp`, its Last Run Result and task history. `documents-mcp.exe status` displays scheduler output and index counters. Confirm Administrator execution and local folder ACLs.
 - **Local health fails:** check `PORT`, another process using it, config/data permissions, free disk space and folder access. Installation remains present for diagnosis if startup checks fail.
 - **Public health fails, local works:** inspect `[tunnel]` logs, the saved token, DNS, outbound network policy and the exact Cloudflare service URL. `PUBLIC_URL` alone does not create a route or DNS record.
+- **Slow tool calls:** each call logs `duration_ms`. A warning with `blocked_ms` means the main thread was busy for that long and every request waited; `indexing` tells whether a scan was running.
 - **401:** use the saved **MCP token**, not the Cloudflare tunnel token. `token` prints it only with elevated privileges.
 - **OCR language error:** `OCR_LANGS` accepts only `rus`, `bel`, `eng` joined by `+`; there are no runtime downloads or optional system language packs.
 - **Partial/failed file:** use `documents_status`; check page/file/text limits, encryption and scan structure. Correct or modify the file to retry. To rebuild, stop the service first, delete only its index database/WAL/SHM, then start again; keep config/tokens.
