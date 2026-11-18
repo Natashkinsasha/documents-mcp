@@ -28,6 +28,8 @@ export class Store {
   }
 
   get(path: string): DocumentRow | undefined { return this.db.prepare('SELECT * FROM documents WHERE path = ?').get(path) as unknown as DocumentRow | undefined; }
+  /** Only what a status needs: on a large index this is far lighter than all(). */
+  summaries(): Pick<DocumentRow, 'path' | 'status' | 'error'>[] { return this.db.prepare('SELECT path, status, error FROM documents ORDER BY path').all() as unknown as Pick<DocumentRow, 'path' | 'status' | 'error'>[]; }
   all(): DocumentRow[] { return this.db.prepare('SELECT * FROM documents ORDER BY path').all() as unknown as DocumentRow[]; }
   chunks(path: string): Chunk[] { return this.db.prepare('SELECT seq, label, text FROM chunks WHERE path = ? ORDER BY seq').all(path) as unknown as Chunk[]; }
 

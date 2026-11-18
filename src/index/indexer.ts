@@ -221,6 +221,38 @@ export class Indexer {
     return { ...counts, processed: counts.ready + counts.partial + counts.failed + counts.unsupported, failures: failures.slice(0, 20), failureTotal: failures.length, scanning: this.scanning || this.jobs.size > 0 };
   }
 
+  /**
+   * Counts from what the index already knows, without touching each file: a client polls this,
+   * and checking every file took over a minute on a folder of 120,000. Changed and deleted files
+   * are noticed by the next pass, as the search results already are.
+   */
+  async quickProgress() {
+    const counts = { total: 0, ready: 0, pending: 0, recognition: 0, partial: 0, failed: 0, unsupported: 0 };
+    const rows = this.store.summaries();
+    const known = new Set<string>();
+    const errors: string[] = [];
+    for (const row of rows) {
+      known.add(row.path);
+      if (this.jobs.has(row.path)) { if (isImage(row.path)) counts.recognition++; else counts.pending++; }
+      else if (row.error === OCR_DEFERRED) counts.recognition++;
+      else if (row.status === 'ok') counts.ready++;
+      else if (row.status === 'partial') counts.partial++;
+      else if (row.status === 'error') counts.failed++;
+      else counts.unsupported++;
+      if (row.status === 'error') errors.push(row.path);
+    }
+    for (const file of this.discovered) if (!known.has(file)) { if (isImage(file)) counts.recognition++; else counts.pending++; }
+    counts.total = rows.length + [...this.discovered].filter((file) => !known.has(file)).length;
+    const failures: DocumentRow[] = [];
+    for (const file of errors) {
+      if (failures.length === 20) break;
+      const row = this.store.get(file);
+      if (!row) continue;
+      try { await this.guard.resolve(file, 'file'); failures.push(row); } catch {}
+    }
+    return { ...counts, processed: counts.ready + counts.partial + counts.failed + counts.unsupported, failures, failureTotal: errors.length, scanning: this.scanning || this.jobs.size > 0 };
+  }
+
   async close(): Promise<void> {
     this.stopped = true;
     clearInterval(this.timer);

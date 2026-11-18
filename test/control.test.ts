@@ -119,6 +119,19 @@ test('rescan requests during a pass collapse into one following pass', async (co
   assert.equal(passes, 2);
 });
 
+test('status stays cheap: it does not check every file', async (context) => {
+  const { fixture, app, control } = await open(context, 'control-cheap');
+  for (let index = 0; index < 40; index++) await write(fixture, `файл-${index}.txt`);
+  await app.indexer.rescan();
+  const guard = app.indexer.guard as unknown as { resolve(...args: unknown[]): Promise<unknown> };
+  const original = guard.resolve.bind(guard);
+  let checks = 0;
+  guard.resolve = (...args) => { checks++; return original(...args); };
+  const status = await control.status();
+  assert.deepEqual([status.counts.total, status.counts.ready, status.counts.processed], [40, 40, 40]);
+  assert.equal(checks, 0);
+});
+
 test('failures are limited to relative paths and MCP status keeps its text', async (context) => {
   const { fixture, app, control } = await open(context, 'control-failures');
   fixture.config.maxFileBytes = 4;

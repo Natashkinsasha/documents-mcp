@@ -130,7 +130,7 @@ These endpoints let a client such as Cue show and manage indexing. They are not 
 | `POST /control/recognition` with `{"paused": true}` or `false` | Defers or resumes background recognition of images and scanned pages and returns the status |
 | `POST /control/rescan` | Returns `202` and checks the folder now. While paused it only finds new and deleted files. A request during a pass runs one more pass afterwards |
 
-Pauses limit only background work: the file being processed finishes, and a document an agent asks for is still read at once, including recognition. Resuming starts a pass. Both switches are stored in `indexing-controls.json` in the index directory, survive restarts and index rebuilds; a damaged file is ignored with a warning.
+`GET /control/status` reads the counts from the index without touching each file, so it stays fast on very large folders; changed and deleted files are reflected after the next scan. Pauses limit only background work: the file being processed finishes, and a document an agent asks for is still read at once, including recognition. Resuming starts a pass. Both switches are stored in `indexing-controls.json` in the index directory, survive restarts and index rebuilds; a damaged file is ignored with a warning.
 
 ### Read-only file browser HTTP API
 
