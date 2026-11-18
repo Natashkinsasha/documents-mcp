@@ -7,9 +7,11 @@ import path from 'node:path';
 import { Store } from './store.js';
 import { IndexControls } from './controls.js';
 import { chunkParts, tokens } from './text.js';
-import { EMPTY_FILE, NOT_FOUND, OCR_DEFERRED, UserError, type DocumentRow, type Logger } from '../types.js';
+import { EMPTY_FILE, NOT_FOUND, OCR_DEFERRED, UserError, type Logger } from '../types.js';
 
 const isImage = (file: string): boolean => imageExtensions.has(path.extname(file).toLowerCase());
+/** Below Node's four file-system threads, so that counting never makes folder listings and reads queue behind it. */
+const PROGRESS_CHECKS = 3;
 import { Trash } from '../trash.js';
 
 export class Indexer {
@@ -24,6 +26,7 @@ export class Indexer {
   private stopped = false;
   private changes: Promise<unknown> = Promise.resolve();
   private rescanAgain = false;
+  private progressPass: ReturnType<Indexer['countProgress']> | undefined;
   private readonly controls: IndexControls;
 
   constructor(readonly config: Config, readonly guard: PathGuard, readonly store: Store, private readonly extractor: Extractor, private readonly logger: Logger, readonly trash = new Trash(guard)) {
@@ -189,35 +192,46 @@ export class Indexer {
     await yieldNow();
   }
 
-  async visibleRows(): Promise<DocumentRow[]> {
-    const rows: DocumentRow[] = [];
-    for (const row of this.store.all()) {
-      try { await this.guard.resolve(row.path, 'file'); rows.push(row); } catch {}
-    }
-    return rows;
+  /** A search's note about unfinished indexing. Reads memory and the index only: its cost must not grow with the files on disk. */
+  searchProgress(): { scanning: boolean; processed: number; total: number } {
+    const scanning = this.scanning || this.jobs.size > 0;
+    if (!scanning) return { scanning, processed: 0, total: 0 };
+    const { documents, processed } = this.store.indexedCounts(OCR_DEFERRED);
+    return { scanning, processed, total: Math.max(documents, this.discovered.size) };
   }
 
-  async progress() {
-    const rows = await this.visibleRows();
+  /** Exact counts, checked against the disk. Slow on large or network folders, so readers at the same moment share one pass. */
+  progress() {
+    this.progressPass ??= this.countProgress().finally(() => { this.progressPass = undefined; });
+    return this.progressPass;
+  }
+
+  private async countProgress() {
+    const rows = new Map(this.store.all().map((row) => [row.path, row]));
+    const files = [...new Set([...this.discovered, ...rows.keys()])];
     const counts = { total: 0, ready: 0, pending: 0, recognition: 0, partial: 0, failed: 0, unsupported: 0 };
-    const current = new Map(rows.map((row) => [row.path, row]));
     const visible = new Set<string>();
-    for (const file of new Set([...this.discovered, ...current.keys()])) {
-      try {
-        const resolved = await this.guard.resolve(file, 'file');
-        visible.add(file);
-        const row = current.get(file);
-        const stale = !row || row.size !== resolved.info.size || row.mtime_ms !== resolved.info.mtimeMs || this.jobs.has(file);
-        if ((stale && isImage(file)) || (!stale && row!.error === OCR_DEFERRED)) counts.recognition++;
-        else if (stale) counts.pending++;
-        else if (row.status === 'ok') counts.ready++;
-        else if (row.status === 'partial') counts.partial++;
-        else if (row.status === 'error') counts.failed++;
-        else counts.unsupported++;
-      } catch {}
-    }
+    let next = 0;
+    const check = async (): Promise<void> => {
+      while (next < files.length) {
+        const file = files[next++]!;
+        try {
+          const resolved = await this.guard.resolve(file, 'file');
+          visible.add(file);
+          const row = rows.get(file);
+          const stale = !row || row.size !== resolved.info.size || row.mtime_ms !== resolved.info.mtimeMs || this.jobs.has(file);
+          if ((stale && isImage(file)) || (!stale && row!.error === OCR_DEFERRED)) counts.recognition++;
+          else if (stale) counts.pending++;
+          else if (row.status === 'ok') counts.ready++;
+          else if (row.status === 'partial') counts.partial++;
+          else if (row.status === 'error') counts.failed++;
+          else counts.unsupported++;
+        } catch {}
+      }
+    };
+    await Promise.all(Array.from({ length: PROGRESS_CHECKS }, check));
     counts.total = visible.size;
-    const failures = rows.filter((row) => row.status === 'error');
+    const failures = [...rows.values()].filter((row) => row.status === 'error' && visible.has(row.path));
     return { ...counts, processed: counts.ready + counts.partial + counts.failed + counts.unsupported, failures: failures.slice(0, 20), failureTotal: failures.length, scanning: this.scanning || this.jobs.size > 0 };
   }
 

@@ -98,7 +98,7 @@ export class Tools {
     }
     const output = [...groups.entries()].map(([file, value], index) => `${index + 1}. ${file}\n   Изменён: ${modifiedDate(value.mtime)}\n${value.snippets.join('\n')}`);
     if (!output.length) output.push('Ничего не найдено. Попробуйте более короткие или другие слова.');
-    const progress = await this.indexer.progress();
+    const progress = this.indexer.searchProgress();
     if (progress.scanning) output.push(`Индексация ещё идёт: обработано ${progress.processed} из ${progress.total} файлов, результаты могут быть неполными.`);
     if (this.indexer.scanFailed) output.push('Последний обход не завершён: результаты могут быть неполными.');
     return output.join('\n\n');

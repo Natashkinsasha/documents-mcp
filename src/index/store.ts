@@ -29,6 +29,10 @@ export class Store {
 
   get(path: string): DocumentRow | undefined { return this.db.prepare('SELECT * FROM documents WHERE path = ?').get(path) as unknown as DocumentRow | undefined; }
   all(): DocumentRow[] { return this.db.prepare('SELECT * FROM documents ORDER BY path').all() as unknown as DocumentRow[]; }
+  /** Documents in the index, and those among them with nothing left to do (`waiting` marks the rest). */
+  indexedCounts(waiting: string): { documents: number; processed: number } {
+    return this.db.prepare('SELECT COUNT(*) AS documents, COALESCE(SUM(error IS NOT ?), 0) AS processed FROM documents').get(waiting) as unknown as { documents: number; processed: number };
+  }
   chunks(path: string): Chunk[] { return this.db.prepare('SELECT seq, label, text FROM chunks WHERE path = ? ORDER BY seq').all(path) as unknown as Chunk[]; }
 
   put(path: string, size: number, mtime: number, status: Status, error: string | null, chunks: Chunk[], bodies?: string[]): void {
