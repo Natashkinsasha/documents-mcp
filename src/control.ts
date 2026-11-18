@@ -9,7 +9,7 @@ export class Control {
   constructor(private readonly indexer: Indexer) {}
 
   async status() {
-    const { failures, failureTotal, scanning, ...counts } = await this.indexer.progress();
+    const { failures, failureTotal, scanning, ...counts } = await this.indexer.quickProgress();
     return {
       version: VERSION,
       paused: this.indexer.paused,
