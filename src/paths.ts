@@ -5,6 +5,45 @@ import picomatch from 'picomatch';
 import { inside } from './config.js';
 import { NOT_FOUND, UserError } from './types.js';
 
+export interface PathMatch { path: string; directory: boolean; complete: boolean }
+/** What is known about a path that was not found. Holds only entries a client could list anyway. */
+export interface PathHint { existing: string; matches: PathMatch[] }
+
+const HINT_NAMES = 5000;
+const HINT_CHECKS = 25;
+const HINT_RESULTS = 5;
+const HINT_SIMILARITY = 0.6;
+const EDIT_DISTANCE_LENGTH = 80;
+
+const comparable = (name: string): string => name.normalize('NFC').toLowerCase().replaceAll('ё', 'е').replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+
+function editDistance(left: string, right: string): number {
+  let previous = Array.from({ length: right.length + 1 }, (_, index) => index);
+  for (let row = 1; row <= left.length; row++) {
+    const current = [row];
+    for (let column = 1; column <= right.length; column++) {
+      current[column] = Math.min(previous[column]! + 1, current[column - 1]! + 1, previous[column - 1]! + (left[row - 1] === right[column - 1] ? 0 : 1));
+    }
+    previous = current;
+  }
+  return previous[right.length]!;
+}
+
+/** From 0 to 1: how likely `name` is what `query` meant, allowing other case, a shortened name and small typos. */
+export function nameSimilarity(query: string, name: string): number {
+  const left = comparable(query);
+  const right = comparable(name);
+  if (!left || !right) return 0;
+  if (left === right) return 1;
+  const leftWords = left.split(' ');
+  const rightWords = right.split(' ');
+  const shared = (words: string[], other: string[]) => words.filter((word) => other.includes(word)).length / words.length;
+  let score = Math.max(shared(leftWords, rightWords) * 0.9, shared(rightWords, leftWords) * 0.8);
+  const longest = Math.max(left.length, right.length);
+  if (longest <= EDIT_DISTANCE_LENGTH && Math.abs(left.length - right.length) <= longest * 0.4) score = Math.max(score, 1 - editDistance(left, right) / longest);
+  return score;
+}
+
 export class PathGuard {
   private readonly matches: (value: string) => boolean;
   constructor(readonly root: string, patterns: string[] = []) {
@@ -88,6 +127,46 @@ export class PathGuard {
       if (kind === 'file' && !info.isFile() || kind === 'directory' && !info.isDirectory()) throw new UserError(NOT_FOUND);
       return { relative, absolute, info };
     } catch { throw new UserError(NOT_FOUND); }
+  }
+
+  /**
+   * Where a path stops existing and which neighbours it probably meant. Every entry passes `resolve`, so a hidden,
+   * ignored or escaping path gets the same answer as one that does not exist.
+   */
+  async suggest(input: string): Promise<PathHint | null> {
+    let segments: string[];
+    try { segments = this.normalize(input).split('/').filter(Boolean); } catch { return null; }
+    if (!segments.length) return null;
+    const join = (...parts: string[]) => parts.filter(Boolean).join('/');
+    let existing = '';
+    let index = 0;
+    for (; index < segments.length; index++) {
+      const next = join(existing, segments[index]!);
+      try { await this.resolve(next, 'directory'); existing = next; } catch { break; }
+    }
+    if (index === segments.length) return { existing, matches: [] };
+    const rest = segments.slice(index + 1);
+    const collator = new Intl.Collator('ru', { numeric: true });
+    const names = (await readdir((await this.resolve(existing, 'directory')).absolute)).slice(0, HINT_NAMES);
+    const likely = names
+      .map((name) => ({ name, score: nameSimilarity(segments[index]!, name) }))
+      .filter((entry) => entry.score >= HINT_SIMILARITY)
+      .sort((left, right) => right.score - left.score || collator.compare(left.name, right.name))
+      .slice(0, HINT_CHECKS);
+    const matches: PathMatch[] = [];
+    for (const { name } of likely) {
+      if (matches.length === HINT_RESULTS) break;
+      const relative = join(existing, name);
+      let directory: boolean;
+      try { directory = (await this.resolve(relative)).info.isDirectory(); } catch { continue; }
+      if (!rest.length) { matches.push({ path: relative, directory, complete: true }); continue; }
+      if (!directory) continue;
+      const whole = join(relative, ...rest);
+      try { matches.push({ path: whole, directory: (await this.resolve(whole)).info.isDirectory(), complete: true }); }
+      catch { matches.push({ path: relative, directory: true, complete: false }); }
+    }
+    matches.sort((left, right) => Number(right.complete) - Number(left.complete));
+    return { existing, matches };
   }
 
   async openFile(input: string): Promise<{ handle: FileHandle; relative: string; info: Awaited<ReturnType<typeof stat>> }> {
