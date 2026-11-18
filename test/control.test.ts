@@ -148,3 +148,30 @@ test('failures are limited to relative paths and MCP status keeps its text', asy
   assert.match(text[8]!, /^Последний завершённый обход: \d{4}-/u);
   assert.equal(text[9], 'Файлы с ошибками:');
 });
+
+test('failures are read page by page in path order, without hidden or deleted files', async (context) => {
+  const { fixture, app } = await open(context, 'control-failures');
+  await app.start();
+  const address = app.http.address(); assert.ok(address && typeof address !== 'string');
+  const headers = { Authorization: `Bearer ${fixture.config.token}` };
+  const read = (query = '', init: RequestInit = { headers }) => fetch(`http://127.0.0.1:${address.port}/control/failures${query}`, init);
+  const names = Array.from({ length: 25 }, (_, index) => `сбой-${String(index).padStart(2, '0')}.txt`);
+  for (const name of names) await write(fixture, name);
+  for (const name of names) { await app.indexer.ensure(name); const row = app.store.get(name)!; app.store.put(name, row.size, row.mtime_ms, 'error', `Причина ${name}`, []); }
+  const first = await read();
+  assert.equal(first.status, 200); assert.equal(first.headers.get('cache-control'), 'no-store');
+  const page = await first.json() as { failures: { path: string; error: string }[]; total: number; nextOffset: number | null };
+  assert.deepEqual(page.failures.map((item) => item.path), names.slice(0, 20));
+  assert.deepEqual([page.failures[0]!.error, page.total, page.nextOffset], [`Причина ${names[0]}`, 25, 20]);
+  assert.deepEqual(await (await read('?offset=20&limit=3')).json().then((value) => { const { failures, total, nextOffset } = value as typeof page; return [failures.map((item) => item.path), total, nextOffset]; }), [names.slice(20, 23), 25, 23]);
+  assert.deepEqual(await (await read('?offset=24&limit=50')).json().then((value) => (value as typeof page).nextOffset), null);
+  assert.deepEqual(await read('?offset=99').then((response) => response.json()), { failures: [], total: 25, nextOffset: null });
+  await rm(path.join(fixture.docs, names[1]!));
+  await write(fixture, '.скрытый.txt');
+  app.store.put('.скрытый.txt', 1, 1, 'error', 'Скрытая причина', []);
+  assert.deepEqual(await (await read('?limit=4')).json().then((value) => (value as typeof page).failures.map((item) => item.path)), [names[0], names[2]]);
+  for (const query of ['?offset=-1', '?offset=x', '?limit=0', '?limit=51', '?offset=1&offset=2', '?other=1']) assert.equal((await read(query)).status, 400, query);
+  assert.equal((await read('', {})).status, 401);
+  assert.equal((await read('', { headers, method: 'POST' })).status, 405);
+  assert.equal((await read('', { headers: { ...headers, Origin: 'https://untrusted.invalid' } })).status, 403);
+});
