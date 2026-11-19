@@ -1,11 +1,11 @@
 import { DatabaseSync } from 'node:sqlite';
 import { chmodSync } from 'node:fs';
 import { INTERRUPTED, OCR_DEFERRED, OCR_TIMEOUT, type Chunk, type DocumentRow, type Status } from '../types.js';
-import { buildQuery, renderChunks, tokens } from './text.js';
+import { buildQuery, chunkStarts, renderChunks, tokens } from './text.js';
 
 /** A scanned page of one file version; `text` is null until it is recognized. */
 export interface RecognitionPage { page: number; text: string | null }
-export interface Hit { path: string; label: string; text: string; mtime_ms: number; rank: number }
+export interface Hit { path: string; seq: number; label: string; text: string; mtime_ms: number; indexed_at: string; rank: number }
 
 export class Store {
   private readonly db: DatabaseSync;
@@ -48,6 +48,12 @@ export class Store {
     return this.db.prepare('SELECT COUNT(*) AS documents, COALESCE(SUM(error IS NOT ?), 0) AS processed FROM documents').get(waiting) as unknown as { documents: number; processed: number };
   }
   chunks(path: string): Chunk[] { return this.db.prepare('SELECT seq, label, text FROM chunks WHERE path = ? ORDER BY seq').all(path) as unknown as Chunk[]; }
+  /** Reads no further than the last wanted chunk, so a hit early in a huge document stays cheap. */
+  chunkOffsets(path: string, seqs: number[]): Map<number, number> {
+    if (!seqs.length) return new Map();
+    const rows = this.db.prepare('SELECT seq, label, text FROM chunks WHERE path = ? AND seq <= ? ORDER BY seq').iterate(path, Math.max(...seqs));
+    return chunkStarts(rows as unknown as Iterable<Chunk>, new Set(seqs));
+  }
 
   recognitionPages(path: string, size: number, mtime: number): RecognitionPage[] {
     return this.db.prepare('SELECT page, text FROM recognition_pages WHERE path = ? AND size = ? AND mtime_ms = ? ORDER BY page').all(path, size, mtime) as unknown as RecognitionPage[];
@@ -107,7 +113,7 @@ export class Store {
     if (!match) return;
     const prefix = folder ? `${folder}/` : '';
     const statement = this.db.prepare(`
-      SELECT chunks.path, chunks.label, chunks.text, documents.mtime_ms,
+      SELECT chunks.path, chunks.seq, chunks.label, chunks.text, documents.mtime_ms, documents.indexed_at,
              bm25(chunk_fts, 8.0, 1.0) AS rank
       FROM chunk_fts JOIN chunks ON chunks.id = chunk_fts.rowid
       JOIN documents ON documents.path = chunks.path

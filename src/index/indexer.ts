@@ -14,6 +14,8 @@ import { Trash } from '../trash.js';
 
 /** Repeats of a file whose processing was cut off, per server run; after them the failure stands. */
 const MAX_RETRIES = 2;
+/** Files one search may send ahead of the queue; the regular pass picks up any others. */
+const MAX_STALE_REFRESHES = 30;
 const RETRIED_ERRORS = new Set([INTERRUPTED, OCR_TIMEOUT]);
 const pageNumber = (label: string): number => Number(/^Страница (\d+)$/u.exec(label)?.[1] ?? 0);
 
@@ -179,6 +181,20 @@ export class Indexer {
     const job = this.enqueue(relative, recognize, urgent);
     this.jobs.set(relative, job);
     try { await job; } finally { this.jobs.delete(relative); }
+  }
+
+  /**
+   * Starts reindexing files a search found out of date, without waiting for them. Recognition stays with the
+   * regular pass. A pause is respected: nobody asked for these files. Returns whether the work was started.
+   */
+  refreshStale(files: Iterable<string>): boolean {
+    if (this.paused) return false;
+    let started = 0;
+    for (const file of files) {
+      if (started++ === MAX_STALE_REFRESHES) break;
+      void this.ensure(file, { recognize: false, urgent: true }).catch(() => {});
+    }
+    return true;
   }
 
   /** What a reader can have before processing ends: the current version's text, with the pages recognized so far. */

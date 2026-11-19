@@ -20,6 +20,8 @@ test('queries are safe, AND/OR and final-prefix work, filename ranks higher', (c
   assert.equal(buildQuery('договор поставки'), '"договор" AND "поставк"*');
   assert.equal(buildQuery('договор поставки', 'OR'), '"договор" OR "поставк"*');
   assert.equal(buildQuery('"*:'), null);
+  assert.equal(buildQuery('код ЛП-0419'), '"код" AND "лп 0419"*');
+  assert.equal(buildQuery('ЛП-0419 код', 'OR'), '"лп" OR "0419" OR "код"*');
   assert.equal([...store.search('договор поста', '', 'AND')].length, 2);
   assert.equal([...store.search('договор absent', '', 'AND')].length, 0);
   assert.equal([...store.search('договор absent', '', 'OR')].length, 2);
@@ -34,6 +36,19 @@ test('chunks preserve originals and never cross parts; excerpt locates an inflec
   assert.equal(renderChunks(chunks), `--- Страница 1 ---\n${original}\n\n--- Страница 2 ---\nконец`);
   const snippet = excerpt(original, 'договор');
   assert.match(snippet, /Договору/u); assert.ok(snippet.startsWith('…')); assert.ok(snippet.length < 310);
+});
+
+test('excerpt prefers a phrase over an earlier lone word and falls back to any word', () => {
+  const text = `Серия ЛП снята. ${'Промежуточный текст. '.repeat(30)}Позиция ЛП-0419 на складе.`;
+  assert.match(excerpt(text, 'ЛП-0419'), /ЛП-0419/u);
+  assert.match(excerpt('Серия ЛП снята.', 'ЛП-0419'), /Серия ЛП/u);
+});
+
+test('a phrase may end in an unfinished word', (context) => {
+  const store = new Store(':memory:'); context.after(() => store.close());
+  store.put('a.txt', 1, 1, 'ok', null, [{ seq: 0, label: '', text: 'Позиция ЛП-0419.' }]);
+  assert.equal([...store.search('ЛП-04', '', 'AND')].length, 1);
+  assert.equal([...store.search('ЛП-05', '', 'AND')].length, 0);
 });
 
 test('legacy encoding, UTF-16 BOM, HTML stripping and basic RTF', () => {
