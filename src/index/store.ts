@@ -1,14 +1,16 @@
 import { DatabaseSync } from 'node:sqlite';
 import { chmodSync } from 'node:fs';
 import { INTERRUPTED, OCR_DEFERRED, OCR_TIMEOUT, type Chunk, type DocumentRow, type Status } from '../types.js';
-import { buildQuery, renderChunks, tokens } from './text.js';
+import { buildQuery, renderChunks, renderedChunks, tokens, type QueryMode } from './text.js';
 
 /** A scanned page of one file version; `text` is null until it is recognized. */
 export interface RecognitionPage { page: number; text: string | null }
-export interface Hit { path: string; label: string; text: string; mtime_ms: number; rank: number }
+/** `start` is where the chunk's text begins in the document's rendered text, as read_document counts offsets. */
+export interface Hit { path: string; seq: number; start: number; label: string; text: string; mtime_ms: number; indexed_at: string; rank: number }
 
 export class Store {
   private readonly db: DatabaseSync;
+  private lastStamp = 0;
   constructor(file: string) {
     this.db = new DatabaseSync(file);
     if (file !== ':memory:') chmodSync(file, 0o600);
@@ -23,7 +25,7 @@ export class Store {
       );
       CREATE TABLE IF NOT EXISTS chunks (
         id INTEGER PRIMARY KEY, path TEXT NOT NULL REFERENCES documents(path) ON DELETE CASCADE,
-        seq INTEGER NOT NULL, label TEXT NOT NULL, text TEXT NOT NULL, UNIQUE(path, seq)
+        seq INTEGER NOT NULL, label TEXT NOT NULL, text TEXT NOT NULL, start INTEGER NOT NULL DEFAULT 0, UNIQUE(path, seq)
       );
       CREATE VIRTUAL TABLE IF NOT EXISTS chunk_fts USING fts5(name_tokens, body_tokens, tokenize='unicode61');
       CREATE TABLE IF NOT EXISTS recognition_pages (
@@ -31,6 +33,30 @@ export class Store {
         PRIMARY KEY (path, page)
       ) WITHOUT ROWID;
     `);
+    this.addChunkStarts();
+  }
+
+  /** An index made before chunks kept their start gets it once, from the text it already holds. */
+  private addChunkStarts(): void {
+    const columns = this.db.prepare('PRAGMA table_info(chunks)').all() as unknown as { name: string }[];
+    if (columns.some((column) => column.name === 'start')) return;
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      this.db.exec('ALTER TABLE chunks ADD COLUMN start INTEGER NOT NULL DEFAULT 0');
+      const update = this.db.prepare('UPDATE chunks SET start = ? WHERE id = ?');
+      const paths = this.db.prepare('SELECT DISTINCT path FROM chunks').all() as unknown as { path: string }[];
+      const chunks = this.db.prepare('SELECT id, label, text FROM chunks WHERE path = ? ORDER BY seq');
+      for (const { path } of paths) {
+        for (const { chunk, start } of renderedChunks(chunks.all(path) as unknown as { id: number; label: string; text: string }[])) update.run(start, chunk.id);
+      }
+      this.db.exec('COMMIT');
+    } catch (error) { this.db.exec('ROLLBACK'); throw error; }
+  }
+
+  /** A version stamp for each write: later than any before it, so equal stamps mean the same index version. */
+  private stamp(): string {
+    this.lastStamp = Math.max(Date.now(), this.lastStamp + 1);
+    return new Date(this.lastStamp).toISOString();
   }
 
   get(path: string): DocumentRow | undefined { return this.db.prepare('SELECT * FROM documents WHERE path = ?').get(path) as unknown as DocumentRow | undefined; }
@@ -61,20 +87,20 @@ export class Store {
 
   /** `scanPages` lists the pages still to recognize of a document left waiting for recognition. */
   put(path: string, size: number, mtime: number, status: Status, error: string | null, chunks: Chunk[], bodies?: string[], scanPages: number[] = []): void {
-    const prepared = chunks.map((chunk, index) => ({ ...chunk, body: bodies?.[index] ?? tokens(chunk.text).join(' ') }));
+    const prepared = [...renderedChunks(chunks)].map(({ chunk, start }, index) => ({ ...chunk, start, body: bodies?.[index] ?? tokens(chunk.text).join(' ') }));
     const name = tokens(path).join(' ');
     this.db.exec('BEGIN IMMEDIATE');
     try {
       this.removeInside(path);
-      this.db.prepare('INSERT INTO documents VALUES (?, ?, ?, ?, ?, ?, ?)').run(path, size, mtime, status, error, renderChunks(chunks).length, new Date().toISOString());
-      const insert = this.db.prepare('INSERT INTO chunks (path, seq, label, text) VALUES (?, ?, ?, ?)');
+      this.db.prepare('INSERT INTO documents VALUES (?, ?, ?, ?, ?, ?, ?)').run(path, size, mtime, status, error, renderChunks(chunks).length, this.stamp());
+      const insert = this.db.prepare('INSERT INTO chunks (path, seq, label, text, start) VALUES (?, ?, ?, ?, ?)');
       const fts = this.db.prepare('INSERT INTO chunk_fts (rowid, name_tokens, body_tokens) VALUES (?, ?, ?)');
       for (const chunk of prepared) {
-        const result = insert.run(path, chunk.seq, chunk.label, chunk.text);
+        const result = insert.run(path, chunk.seq, chunk.label, chunk.text, chunk.start);
         fts.run(result.lastInsertRowid, name, chunk.body);
       }
       if (!prepared.length && (status === 'ok' || status === 'partial')) {
-        const result = insert.run(path, 0, '', '');
+        const result = insert.run(path, 0, '', '', 0);
         fts.run(result.lastInsertRowid, name, '');
       }
       // Unfinished work keeps its pages: a later run, even after a restart, continues from them.
@@ -102,12 +128,12 @@ export class Store {
     catch (error) { this.db.exec('ROLLBACK'); throw error; }
   }
 
-  *search(query: string, folder: string, mode: 'AND' | 'OR'): Generator<Hit> {
+  *search(query: string, folder: string, mode: QueryMode): Generator<Hit> {
     const match = buildQuery(query, mode);
     if (!match) return;
     const prefix = folder ? `${folder}/` : '';
     const statement = this.db.prepare(`
-      SELECT chunks.path, chunks.label, chunks.text, documents.mtime_ms,
+      SELECT chunks.path, chunks.seq, chunks.start, chunks.label, chunks.text, documents.mtime_ms, documents.indexed_at,
              bm25(chunk_fts, 8.0, 1.0) AS rank
       FROM chunk_fts JOIN chunks ON chunks.id = chunk_fts.rowid
       JOIN documents ON documents.path = chunks.path

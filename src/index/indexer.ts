@@ -181,6 +181,17 @@ export class Indexer {
     try { await job; } finally { this.jobs.delete(relative); }
   }
 
+  /**
+   * A search found files changed since indexing: a pass picks them up in its usual order, behind the files agents
+   * are reading and with recognition where it is due. A pause is respected, as nobody asked for these files.
+   * Returns whether a pass will run.
+   */
+  noticeChanges(): boolean {
+    if (this.paused || this.stopped) return false;
+    this.requestRescan();
+    return true;
+  }
+
   /** What a reader can have before processing ends: the current version's text, with the pages recognized so far. */
   readingProgress(file: string, info: { size: number; mtimeMs: number }): ReadingProgress {
     const row = this.store.get(file);
