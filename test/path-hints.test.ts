@@ -1,7 +1,7 @@
 import { test, type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
-import { mkdir, rm, symlink, writeFile } from 'node:fs/promises';
+import { access, mkdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { createApp } from '../src/app.js';
 import { nameSimilarity } from '../src/paths.js';
 import { NOT_FOUND } from '../src/types.js';
@@ -18,7 +18,8 @@ async function archive(context: TestContext, prefix: string) {
   await writeFile(path.join(fixture.docs, 'Объекты', 'Тендер (Лесная 12)', 'поставщики', 'Альфа', 'счёт.txt'), 'Счёт');
   await writeFile(path.join(fixture.docs, 'Объекты', 'Договор поставки.txt'), 'Договор');
   await app.indexer.rescan();
-  return { app, fixture };
+  const caseInsensitive = await access(path.join(fixture.docs, 'объекты')).then(() => true, () => false);
+  return { app, fixture, caseInsensitive };
 }
 const refusal = async (app: Awaited<ReturnType<typeof archive>>['app'], tool: string, input: object) => {
   const result = await app.tools.call(tool, input);
@@ -39,9 +40,11 @@ test('a shortened folder name leads to the whole existing path', async (context)
 });
 
 test('reading and searching get the same hint, with files named as files', async (context) => {
-  const { app } = await archive(context, 'hint-tools');
+  const { app, caseInsensitive } = await archive(context, 'hint-tools');
   assert.match(await refusal(app, 'read_document', { path: 'Объекты/договор  поставки.TXT' }), /- Объекты\/Договор поставки\.txt — файл/u);
-  assert.match(await refusal(app, 'search_documents', { query: 'счёт', folder: 'объекты' }), /- Объекты\/ — папка/u);
+  // On a case-insensitive disk (Windows, macOS) the folder exists under any case, so search runs in it.
+  if (caseInsensitive) assert.match(resultText(await app.tools.call('search_documents', { query: 'счёт', folder: 'объекты' })), /Объекты\/Тендер \(Лесная 12\)\/поставщики\/Альфа\/счёт\.txt/u);
+  else assert.match(await refusal(app, 'search_documents', { query: 'счёт', folder: 'объекты' }), /- Объекты\/ — папка/u);
 });
 
 test('a path with nothing similar points to the part that exists', async (context) => {
