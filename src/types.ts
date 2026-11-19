@@ -6,6 +6,8 @@ export interface Extraction {
   scanPages?: number[];
   /** Recognition stopped between pages to let another file go first; nothing is final yet. */
   yielded?: boolean;
+  /** Some pages ran out of recognition time: another run may still get them. */
+  retryPages?: boolean;
 }
 /** Reason kept on a document whose scanned pages wait for the recognition pass that follows all other documents. */
 export const EMPTY_FILE = 'Файл пустой (0 байт): в нём нет содержимого.';

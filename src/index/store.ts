@@ -1,6 +1,6 @@
 import { DatabaseSync } from 'node:sqlite';
 import { chmodSync } from 'node:fs';
-import { OCR_DEFERRED, type Chunk, type DocumentRow, type Status } from '../types.js';
+import { INTERRUPTED, OCR_DEFERRED, OCR_TIMEOUT, type Chunk, type DocumentRow, type Status } from '../types.js';
 import { buildQuery, renderChunks, tokens } from './text.js';
 
 /** A scanned page of one file version; `text` is null until it is recognized. */
@@ -77,7 +77,8 @@ export class Store {
         const result = insert.run(path, 0, '', '');
         fts.run(result.lastInsertRowid, name, '');
       }
-      if (error === OCR_DEFERRED) {
+      // Unfinished work keeps its pages: a later run, even after a restart, continues from them.
+      if (error === OCR_DEFERRED || error === INTERRUPTED || error === OCR_TIMEOUT) {
         this.db.prepare('DELETE FROM recognition_pages WHERE path = ? AND (size <> ? OR mtime_ms <> ?)').run(path, size, mtime);
         const page = this.db.prepare('INSERT OR IGNORE INTO recognition_pages (path, size, mtime_ms, page) VALUES (?, ?, ?, ?)');
         for (const number of scanPages) page.run(path, size, mtime, number);

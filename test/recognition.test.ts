@@ -9,12 +9,13 @@ import type { OcrEngine } from '../src/extract/ocr.js';
 import { PathGuard } from '../src/paths.js';
 import { prepareRuntime } from '../src/runtime.js';
 import { Tools } from '../src/tools.js';
-import { INTERRUPTED, InterruptedError, OCR_DEFERRED, type Extraction } from '../src/types.js';
+import { INTERRUPTED, InterruptedError, OCR_DEFERRED, OCR_TIMEOUT, type Extraction } from '../src/types.js';
 import { projectRoot, resultText, scannedPdf, tempProject } from './helpers.js';
 
 type Extract = (file: string, options?: ExtractOptions) => Promise<Extraction>;
 const page = (number: number, text: string) => ({ label: `Страница ${number}`, text });
 const done = (text = 'Готовый текст документа'): Extraction => ({ parts: [page(1, text)], partial: false });
+const renderedChunks = (chunks: { text: string }[]) => chunks.map((chunk) => chunk.text).join('\n');
 const tick = () => new Promise((resolve) => setTimeout(resolve, 5));
 
 async function open(context: TestContext, name: string) {
@@ -75,8 +76,11 @@ test('a requested file overtakes background recognition, which then resumes', as
     return done();
   };
   const background = app.indexer.ensure('фон.pdf');
-  const queued = app.indexer.ensure('ещё.pdf');
+  // Each request resolves its path first, so they are started in turn to fix the queue order.
   while (!started) await tick();
+  const queued = app.indexer.ensure('ещё.pdf');
+  const jobs = (app.indexer as unknown as { jobs: Map<string, unknown> }).jobs;
+  while (!jobs.has('ещё.pdf')) await tick();
   await app.indexer.ensure('нужный.pdf', { urgent: true });
   await Promise.all([background, queued]);
   assert.deepEqual(calls, ['фон.pdf', 'нужный.pdf', 'фон.pdf', 'ещё.pdf']);
@@ -134,9 +138,9 @@ test('the watchdog counts time without progress, not the length of the job', asy
   const runtime = path.join(fixture.directory, 'runtime'); await mkdir(runtime);
   await writeFile(path.join(runtime, 'extract-worker.cjs'), `const {parentPort}=require('node:worker_threads');const fs=require('node:fs');
 parentPort.on('message',m=>{if(m.stop){parentPort.close();return;}if(m.yieldOnly)return;const hang=fs.readFileSync(m.file,'utf8')==='hang';let n=0;
-const t=setInterval(()=>{n++;parentPort.postMessage({id:m.id,page:n});if(n===8){clearInterval(t);if(!hang)parentPort.postMessage({id:m.id,result:{parts:[],partial:false}});}},40);});`);
+const t=setInterval(()=>{n++;parentPort.postMessage({id:m.id,page:n});if(n===8){clearInterval(t);if(!hang)parentPort.postMessage({id:m.id,result:{parts:[],partial:false}});}},100);});`);
   await writeFile(path.join(fixture.docs, 'good.txt'), 'good'); await writeFile(path.join(fixture.docs, 'hang.txt'), 'hang');
-  const extractor = new Extractor(new PathGuard(fixture.docs, []), runtime, ['rus'], 1000, 1, 150);
+  const extractor = new Extractor(new PathGuard(fixture.docs, []), runtime, ['rus'], 1000, 1, 500);
   context.after(async () => { await extractor.close(); await rm(fixture.directory, { recursive: true, force: true }); });
   assert.equal((await extractor.extract('good.txt')).partial, false);
   await assert.rejects(extractor.extract('hang.txt'), InterruptedError);
@@ -158,10 +162,43 @@ test('with the real worker a scan gives way to a request and survives losing the
   assert.equal(app.store.get('договор.txt')?.status, 'ok');
   assert.equal(app.store.get('скан.pdf')?.error, OCR_DEFERRED);
   const before = known.length;
-  while (known.length === before) await tick();
-  await (extractor as unknown as { worker: { terminate(): Promise<number> } }).worker.terminate();
+  const internals = extractor as unknown as { worker: { terminate(): Promise<number> }; pending: Map<number, unknown> };
+  // Only a job the worker already holds is interrupted by losing it.
+  while (known.length === before || !internals.pending.size) await tick();
+  await internals.worker.terminate();
   await scan;
   assert.equal(app.store.get('скан.pdf')?.status, 'ok', app.store.get('скан.pdf')?.error ?? '');
   assert.equal(known[0], 0); assert.ok(known.slice(1).every((size) => size >= 1), known.join());
   assert.ok(known.length >= 3, known.join());
+});
+
+test('a page out of recognition time is tried again without giving up the other pages', async (context) => {
+  const fixture = await tempProject('pdf-timeout'); context.after(() => rm(fixture.directory, { recursive: true, force: true }));
+  const runtime = await prepareRuntime(fixture.config.indexDir);
+  const file = path.join(fixture.docs, 'скан.pdf'); await scannedPdf(file, path.join(projectRoot, 'test/fixtures/russian.png'), 2);
+  let calls = 0;
+  const ocr = { recognize: async () => { if (++calls === 1) throw new InterruptedError(OCR_TIMEOUT); return 'Текст страницы'; } } as unknown as OcrEngine;
+  const result = await extractPdf(file, runtime, ocr, 10);
+  assert.equal(result.retryPages, true); assert.equal(result.partial, true); assert.equal(result.parts[1]?.text, 'Текст страницы');
+});
+
+test('pages that never get recognized leave a partial document after the retries', async (context) => {
+  const { app, extractor, add } = await open(context, 'retry-pages');
+  const info = await add('скан.pdf');
+  app.store.put('скан.pdf', info.size, info.mtimeMs, 'partial', OCR_DEFERRED, [], undefined, [1, 2]);
+  let calls = 0;
+  extractor.extract = async (_file, options) => { calls++; options?.onPage?.(2, 'Вторая'); return { parts: [page(2, 'Вторая')], partial: true, reason: 'Не удалось распознать часть страниц.', retryPages: true }; };
+  await app.indexer.ensure('скан.pdf');
+  assert.equal(calls, 3); assert.equal(app.store.get('скан.pdf')?.status, 'partial');
+  assert.match(renderedChunks(app.store.chunks('скан.pdf')), /Вторая/u);
+});
+
+test('recognized pages outlive a file that kept being interrupted', async (context) => {
+  const { app, extractor, add } = await open(context, 'retry-keeps');
+  const info = await add('скан.pdf');
+  app.store.put('скан.pdf', info.size, info.mtimeMs, 'partial', OCR_DEFERRED, [], undefined, [1, 2]);
+  extractor.extract = async (_file, options) => { options?.onPage?.(1, 'Первая'); throw new InterruptedError(INTERRUPTED); };
+  await app.indexer.ensure('скан.pdf');
+  assert.equal(app.store.get('скан.pdf')?.error, INTERRUPTED);
+  assert.deepEqual(app.store.recognitionPages('скан.pdf', info.size, info.mtimeMs).map((row) => [row.page, row.text]), [[1, 'Первая'], [2, null]]);
 });

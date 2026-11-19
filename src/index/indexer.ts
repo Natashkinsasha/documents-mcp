@@ -259,6 +259,14 @@ export class Indexer {
     this.store.put(file, final.info.size, final.info.mtimeMs, extracted.unsupported ? 'unsupported' : extracted.partial ? 'partial' : 'ok', extracted.reason ?? null, chunks, bodies, extracted.ocrDeferred ? extracted.scanPages : []);
   }
 
+  private noteRetry(file: string): boolean {
+    const attempt = (this.retries.get(file) ?? 0) + 1;
+    if (attempt > MAX_RETRIES) return false;
+    this.retries.set(file, attempt);
+    this.logger({ level: 'warn', message: 'Обработка файла прервана, будет повторена.', attempt });
+    return true;
+  }
+
   private async indexFile(job: QueuedJob): Promise<JobOutcome> {
     const { file, recognize } = job;
     if (this.stopped) return 'done';
@@ -283,17 +291,14 @@ export class Indexer {
         onPage: (page, text) => { if (text !== undefined) this.store.saveRecognizedPage(file, size, mtimeMs, page, text); },
       });
       if (extracted.yielded) return 'yielded';
+      // Pages that ran out of time get another run; if they never succeed, the rest of the document still stands.
+      if (extracted.retryPages && this.noteRetry(file)) return 'retry';
       await this.save(file, before.info, extracted);
       this.retries.delete(file);
     } catch (error) {
       if (this.stopped) return 'done';
       try { await this.guard.resolve(file, 'file'); } catch { this.store.remove(file); throw new UserError(NOT_FOUND); }
-      const attempts = this.retries.get(file) ?? 0;
-      if (error instanceof InterruptedError && attempts < MAX_RETRIES) {
-        this.retries.set(file, attempts + 1);
-        this.logger({ level: 'warn', message: 'Обработка файла прервана, будет повторена.', attempt: attempts + 1 });
-        return 'retry';
-      }
+      if (error instanceof InterruptedError && this.noteRetry(file)) return 'retry';
       this.store.put(file, size, mtimeMs, 'error', error instanceof UserError ? error.message : 'Не удалось обработать файл.', []);
     }
     await yieldNow();

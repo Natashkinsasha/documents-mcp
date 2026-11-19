@@ -2,7 +2,7 @@ import { readFile } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
 import path from 'node:path';
 import { PNG } from 'pngjs';
-import { MAX_TEXT, OCR_DEFERRED, type Extraction, type Part } from '../types.js';
+import { InterruptedError, MAX_TEXT, OCR_DEFERRED, type Extraction, type Part } from '../types.js';
 import type { OcrEngine } from './ocr.js';
 
 interface TextItem { str: string; transform: number[]; width: number; height: number; hasEOL: boolean }
@@ -71,7 +71,7 @@ export async function extractPdf(file: string, runtime: string, ocr: OcrEngine, 
   const document = await library.getDocumentProxy(new Uint8Array(await readFile(file)), { isOffscreenCanvasSupported: false, isImageDecoderSupported: false, maxImageSize: 36_000_000, verbosity: 0 });
   const parts: Part[] = [];
   const scanPages: number[] = [];
-  let ocrPages = 0; let characters = 0; let partial = false; let reason: string | undefined; let deferred = false;
+  let ocrPages = 0; let characters = 0; let partial = false; let reason: string | undefined; let deferred = false; let retryPages = false;
   try {
     const { OPS } = await import(pathToFileURL(path.join(runtime, 'pdf/pdfjs.mjs')).href);
     for (let number = 1; number <= document.numPages; number++) {
@@ -106,7 +106,7 @@ export async function extractPdf(file: string, runtime: string, ocr: OcrEngine, 
               if (!largest) throw new Error('На странице нет доступного изображения.');
               text = await ocr.recognize(pixelsToPng(largest));
               recognized = true;
-            } catch { partial = true; reason = 'Не удалось распознать часть страниц.'; }
+            } catch (error) { partial = true; reason = 'Не удалось распознать часть страниц.'; retryPages ||= error instanceof InterruptedError; }
           }
         }
         progress.onPage?.(number, recognized ? text : undefined);
@@ -115,6 +115,6 @@ export async function extractPdf(file: string, runtime: string, ocr: OcrEngine, 
         if (characters > MAX_TEXT) { partial = true; reason = 'Достигнут предел извлечённого текста.'; break; }
       } finally { page.cleanup(); }
     }
-    return deferred ? { parts, partial: true, reason: OCR_DEFERRED, ocrDeferred: true, scanPages } : { parts, partial, reason, scanPages };
+    return deferred ? { parts, partial: true, reason: OCR_DEFERRED, ocrDeferred: true, scanPages } : { parts, partial, reason, scanPages, ...(retryPages ? { retryPages } : {}) };
   } finally { await document.loadingTask.destroy(); }
 }
