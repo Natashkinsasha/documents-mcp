@@ -91,7 +91,9 @@ export class Tools {
   }
 
   private async search(input: z.infer<typeof schemas.search_documents>): Promise<string> {
-    const folder = (await this.indexer.guard.resolve(input.folder ?? '', 'directory')).relative;
+    // The index keeps on-disk names: on a case-insensitive disk (Windows, macOS) "объекты" opens "Объекты", and
+    // searching under the name as typed would answer "nothing found" for a folder that holds matches.
+    const folder = (await this.indexer.guard.resolve(input.folder ?? '', 'directory')).canonical;
     const groups = new Map<string, { mtime: number; snippets: { offset: number | undefined; label: string; excerpt: string }[] }>();
     const stale = new Set<string>();
     for (const mode of ['PHRASE', 'AND', 'OR'] as const) {

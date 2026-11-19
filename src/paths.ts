@@ -125,7 +125,7 @@ export class PathGuard {
       if (canonicalRelative && this.ignored(canonicalRelative)) throw new UserError(NOT_FOUND);
       const info = await stat(absolute);
       if (kind === 'file' && !info.isFile() || kind === 'directory' && !info.isDirectory()) throw new UserError(NOT_FOUND);
-      return { relative, absolute, info };
+      return { relative, canonical: canonicalRelative, absolute, info };
     } catch { throw new UserError(NOT_FOUND); }
   }
 

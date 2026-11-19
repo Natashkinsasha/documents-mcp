@@ -18,9 +18,14 @@ import { Control } from '../src/control.js';
 import { VERSION } from '../src/version.js';
 import { tempProject } from './helpers.js';
 
+const [major, minor] = VERSION.split('.').map(Number);
+// Update targets stay newer than the current release, so bumping VERSION does not break these tests.
+const TARGET = `${major}.${minor + 1}.0`;
+const LATER = `${major}.${minor + 2}.0`;
+
 const keys = generateKeyPairSync('ed25519');
 const payload = Buffer.from('test executable, never executed');
-function release(version = '1.6.0', content = payload, extra: Record<string, unknown> = {}) {
+function release(version = TARGET, content = payload, extra: Record<string, unknown> = {}) {
   const manifest = { schema: 1, version, assets: { 'win-x64': { name: UPDATE_ASSET, size: content.length, sha256: createHash('sha256').update(content).digest('hex') } }, ...extra };
   const bytes = Buffer.from(JSON.stringify(manifest));
   return { bytes, signature: sign(null, bytes, keys.privateKey).toString('base64'), manifest, content };
@@ -58,15 +63,15 @@ async function until(check: () => Promise<boolean>): Promise<void> {
 }
 
 test('signature is verified before parsing, and signed schema/versions are strict', () => {
-  const official = release(); assert.equal(signedManifest(official.bytes, official.signature, keys.publicKey).version, '1.6.0');
+  const official = release(); assert.equal(signedManifest(official.bytes, official.signature, keys.publicKey).version, TARGET);
   const badJson = Buffer.from('not json');
   assert.throws(() => signedManifest(badJson, official.signature, keys.publicKey), errorCode('signature'));
-  assert.throws(() => signedManifest(Buffer.from(official.bytes.toString().replace('1.6.0', '9.0.0')), official.signature, keys.publicKey), errorCode('signature'));
+  assert.throws(() => signedManifest(Buffer.from(official.bytes.toString().replace(TARGET, '9.0.0')), official.signature, keys.publicKey), errorCode('signature'));
   const other = generateKeyPairSync('ed25519');
   assert.throws(() => signedManifest(official.bytes, sign(null, official.bytes, other.privateKey).toString('base64'), keys.publicKey), errorCode('signature'));
-  for (const invalid of [release('01.6.0'), release('1.6.0-beta'), release('1.6.0+build'), release('1.6.0', payload, { url: 'https://evil.invalid' }), release('1.6.0', payload, { schema: 2 })]) assert.throws(() => signedManifest(invalid.bytes, invalid.signature, keys.publicKey), errorCode('signature'));
+  for (const invalid of [release(`0${TARGET}`), release(`${TARGET}-beta`), release(`${TARGET}+build`), release(TARGET, payload, { url: 'https://evil.invalid' }), release(TARGET, payload, { schema: 2 })]) assert.throws(() => signedManifest(invalid.bytes, invalid.signature, keys.publicKey), errorCode('signature'));
   for (const asset of [{ name: '../evil.exe' }, { size: 0 }, { size: 1024 ** 3 + 1 }, { sha256: 'bad' }, { command: 'evil' }]) {
-    const invalid = release('1.6.0', payload, { assets: { 'win-x64': { ...official.manifest.assets['win-x64'], ...asset } } });
+    const invalid = release(TARGET, payload, { assets: { 'win-x64': { ...official.manifest.assets['win-x64'], ...asset } } });
     assert.throws(() => signedManifest(invalid.bytes, invalid.signature, keys.publicKey), errorCode('signature'));
   }
   assert.equal(newer('1.10.0', '1.9.0'), true); assert.equal(newer('1.5.0', VERSION), false);
@@ -130,7 +135,7 @@ test('Range resumes interrupted stream and keeps progress across restart', async
   let retries = 0;
   await downloadUpdate(state.paths, { ...state.dependencies, fetch, signal: new AbortController().signal, sleep: async () => { retries++; } }, async () => {});
   assert.equal(retries, 1); assert.deepEqual(await readFile(state.files.partial), payload);
-  await saveUpdate(state.paths, { ...idleUpdate(), from: VERSION, state: 'downloading', target: '1.6.0', received: 7 });
+  await saveUpdate(state.paths, { ...idleUpdate(), from: VERSION, state: 'downloading', target: TARGET, received: 7 });
   await writeFile(state.files.partial, payload.subarray(0, 7));
   const restarted = await state.controller(true, { fetch });
   assert.equal((await restarted.status(false)).error, 'interrupted');
@@ -139,11 +144,11 @@ test('Range resumes interrupted stream and keeps progress across restart', async
 });
 
 test('a different signed manifest discards partial and never resumes against its bytes', async (context) => {
-  const state = await fixture(context); const previous = release('1.6.0'); const next = release('1.7.0', Buffer.from('different new binary'));
+  const state = await fixture(context); const previous = release(TARGET); const next = release(LATER, Buffer.from('different new binary'));
   await mkdir(state.files.directory); await writeFile(state.files.manifest, previous.bytes); await writeFile(state.files.partial, payload.subarray(0, 7));
   const fetch = source(next, (init) => { assert.equal(new Headers(init?.headers).has('range'), false); return new Response(next.content); });
   const update = await state.controller(true, { fetch }); await update.start(); await update.settled();
-  assert.deepEqual(await readFile(state.files.candidate), next.content); assert.equal((await update.status(false)).target, '1.7.0');
+  assert.deepEqual(await readFile(state.files.candidate), next.content); assert.equal((await update.status(false)).target, LATER);
 });
 
 test('double start and cross-process lock allow only one job', async (context) => {
@@ -165,12 +170,12 @@ test('GET never waits for network and background availability is throttled acros
   const update = await state.controller(true, { fetch });
   const initial = await update.status(); assert.equal(initial.available, null);
   await until(async () => calls === 1); unblock();
-  await until(async () => (await update.status(false)).available === '1.6.0');
+  await until(async () => (await update.status(false)).available === TARGET);
   await update.status();
   const another = await state.controller(true, { fetch }); await another.status(); await delay(30);
   assert.equal(calls, 2);
   // The cached release stops being offered once the program runs it, without waiting for the next hourly check.
-  assert.equal((await (await state.controller(true, { fetch, current: '1.6.0' })).status(false)).available, null);
+  assert.equal((await (await state.controller(true, { fetch, current: TARGET })).status(false)).available, null);
 });
 
 test('update files must not be exposed through documents, custom index or symlink', async (context) => {
@@ -195,22 +200,22 @@ for (const scenario of ['success', 'swap', 'health', 'start', 'interrupted'] as 
   const before = await readFile(state.paths.config);
   if (scenario === 'interrupted') {
     await writeFile(state.files.previous, 'old executable'); await writeFile(state.files.configBackup, before);
-    await saveUpdate(state.paths, { ...idleUpdate(), from: VERSION, target: '1.6.0', state: 'installing', phase: 'backed_up' });
+    await saveUpdate(state.paths, { ...idleUpdate(), from: VERSION, target: TARGET, state: 'installing', phase: 'backed_up' });
     await rm(state.paths.binary);
   }
   let swapFailed = false; let startFailed = false; let removed = 0;
   await applyUpdate(state.paths, {
-    platform: 'win32', version: '1.6.0', executable: state.files.candidate, key: keys.publicKey, administrator: async () => {},
+    platform: 'win32', version: TARGET, executable: state.files.candidate, key: keys.publicKey, administrator: async () => {},
     swap: async (source, destination) => { if (scenario === 'swap' && source === state.files.staged && !swapFailed) { swapFailed = true; throw new Error('locked'); } await rename(source, destination); },
     service: async (action) => { calls.push(action); if (scenario === 'start' && action === 'start' && !startFailed) { startFailed = true; throw new Error('scheduler refused'); } return ''; },
-    health: async (settings, target) => { assert.equal(settings.MCP_TOKEN, state.settings.MCP_TOKEN); assert.equal(target, '1.6.0'); return scenario !== 'health'; },
+    health: async (settings, target) => { assert.equal(settings.MCP_TOKEN, state.settings.MCP_TOKEN); assert.equal(target, TARGET); return scenario !== 'health'; },
     removeTask: async () => { removed++; },
   });
   const result = await readJson<UpdateRecord>(state.files.state);
   assert.equal(removed, 1);
   if (scenario === 'success') {
     assert.deepEqual(await readFile(state.paths.binary), current.content);
-    assert.equal((await readConfigFile(state.paths.config)).INSTALLED_VERSION, '1.6.0');
+    assert.equal((await readConfigFile(state.paths.config)).INSTALLED_VERSION, TARGET);
     assert.equal(result?.state, 'idle'); assert.equal(result?.error, null); assert.deepEqual(calls, ['stop', 'start']);
   } else {
     assert.equal(await readFile(state.paths.binary, 'utf8'), 'old executable');
@@ -220,14 +225,14 @@ for (const scenario of ['success', 'swap', 'health', 'start', 'interrupted'] as 
   }
   assert.equal(await readFile(state.files.previous, 'utf8'), 'old executable');
   for (const file of [state.files.candidate, state.files.manifest, state.files.configBackup]) await assert.rejects(stat(file));
-  const restarted = await state.controller(true, { current: scenario === 'success' ? '1.6.0' : VERSION });
+  const restarted = await state.controller(true, { current: scenario === 'success' ? TARGET : VERSION });
   assert.equal((await restarted.status(false)).state, result?.state); assert.equal((await restarted.status(false)).error, result?.error);
 });
 
 test('apply-update verifies its own bytes and does not stop service on mismatch', async (context) => {
   const state = await fixture(context); const update = await state.controller(); await update.start(); await update.settled();
   await writeFile(state.files.candidate, 'tampered executable');
-  await applyUpdate(state.paths, { platform: 'win32', version: '1.6.0', executable: state.files.candidate, key: keys.publicKey, administrator: async () => {}, service: async () => assert.fail('must not stop'), removeTask: async () => {} });
+  await applyUpdate(state.paths, { platform: 'win32', version: TARGET, executable: state.files.candidate, key: keys.publicKey, administrator: async () => {}, service: async () => assert.fail('must not stop'), removeTask: async () => {} });
   assert.equal((await readJson<UpdateRecord>(state.files.state))?.error, 'integrity');
   assert.equal(await readFile(state.paths.binary, 'utf8'), 'old executable');
 });
@@ -237,7 +242,7 @@ test('apply-update rechecks consent and executable-volume space before stopping'
   for (const failure of ['disabled', 'disk']) {
     const update = await state.controller(); await update.start(); await update.settled();
     await writeFile(state.paths.config, serializeConfig({ ...state.settings, REMOTE_UPDATE: failure === 'disabled' ? '0' : '1' }));
-    await applyUpdate(state.paths, { platform: 'win32', version: '1.6.0', executable: state.files.candidate, key: keys.publicKey, administrator: async () => {}, service: async () => assert.fail('must not stop'), freeSpace: async () => failure === 'disk' ? 0 : 10 ** 12, removeTask: async () => {} });
+    await applyUpdate(state.paths, { platform: 'win32', version: TARGET, executable: state.files.candidate, key: keys.publicKey, administrator: async () => {}, service: async () => assert.fail('must not stop'), freeSpace: async () => failure === 'disk' ? 0 : 10 ** 12, removeTask: async () => {} });
     assert.equal((await readJson<UpdateRecord>(state.files.state))?.error, failure);
     assert.equal(await readFile(state.paths.binary, 'utf8'), 'old executable');
   }
@@ -247,21 +252,21 @@ test('failed rollback retains journal/backups and can recover on helper retry', 
   const state = await fixture(context); const update = await state.controller(); await update.start(); await update.settled();
   const before = await readFile(state.paths.config);
   await assert.rejects(applyUpdate(state.paths, {
-    platform: 'win32', version: '1.6.0', executable: state.files.candidate, key: keys.publicKey, administrator: async () => {},
+    platform: 'win32', version: TARGET, executable: state.files.candidate, key: keys.publicKey, administrator: async () => {},
     service: async (action) => { if (action === 'start') throw new Error('scheduler unavailable'); return ''; },
     health: async () => false, swap: rename, removeTask: async () => assert.fail('keep recovery task'),
   }), errorCode('install'));
   const failed = await readJson<UpdateRecord>(state.files.state);
   assert.equal(failed?.error, 'install'); assert.ok(failed?.phase); assert.equal(failed?.cleanup, false);
   assert.deepEqual(await readFile(state.files.configBackup), before); assert.ok((await stat(state.files.candidate)).isFile());
-  await applyUpdate(state.paths, { platform: 'win32', version: '1.6.0', executable: state.files.candidate, key: keys.publicKey, administrator: async () => {}, service: async () => '', swap: rename, removeTask: async () => {} });
+  await applyUpdate(state.paths, { platform: 'win32', version: TARGET, executable: state.files.candidate, key: keys.publicKey, administrator: async () => {}, service: async () => '', swap: rename, removeTask: async () => {} });
   assert.deepEqual(await readFile(state.paths.config), before); assert.equal(await readFile(state.paths.binary, 'utf8'), 'old executable');
   assert.equal((await readJson<UpdateRecord>(state.files.state))?.error, 'interrupted');
 });
 
 test('health requires matching authenticated version and private live startup receipt', async (context) => {
   const state = await fixture(context); await mkdir(state.files.directory);
-  let currentTime = 0; let version = '1.6.0';
+  let currentTime = 0; let version = TARGET;
   const dependencies = {
     now: () => currentTime, timeoutMs: 1, sleep: async () => { currentTime++; }, alive: (pid: number) => { assert.equal(pid, process.pid); },
     fetch: (async (input, init) => {
@@ -271,10 +276,10 @@ test('health requires matching authenticated version and private live startup re
       return Response.json({ version, failures: [{ path: 'long'.repeat(5000) }] });
     }) as typeof fetch,
   };
-  assert.equal(await versionHealth(state.settings, '1.6.0', state.paths, dependencies), false);
-  await writeFile(state.files.running, JSON.stringify({ version: '1.6.0', pid: process.pid }));
-  currentTime = 0; assert.equal(await versionHealth(state.settings, '1.6.0', state.paths, dependencies), true);
-  version = VERSION; currentTime = 0; assert.equal(await versionHealth(state.settings, '1.6.0', state.paths, dependencies), false);
+  assert.equal(await versionHealth(state.settings, TARGET, state.paths, dependencies), false);
+  await writeFile(state.files.running, JSON.stringify({ version: TARGET, pid: process.pid }));
+  currentTime = 0; assert.equal(await versionHealth(state.settings, TARGET, state.paths, dependencies), true);
+  version = VERSION; currentTime = 0; assert.equal(await versionHealth(state.settings, TARGET, state.paths, dependencies), false);
 });
 
 test('short bodies resume, ignored Range restarts, and invalid Content-Range fails closed', async (context) => {
@@ -292,7 +297,7 @@ test('short bodies resume, ignored Range restarts, and invalid Content-Range fai
 });
 
 test('signed manifest changes between retry attempts discard the old partial', async (context) => {
-  const state = await fixture(context); let current = release(); const next = release('1.7.0', Buffer.from('replacement release'));
+  const state = await fixture(context); let current = release(); const next = release(LATER, Buffer.from('replacement release'));
   let binary = 0;
   const fetch = (async (input: Parameters<typeof globalThis.fetch>[0], init?: RequestInit) => source(current, (options) => {
     binary++;
@@ -300,7 +305,7 @@ test('signed manifest changes between retry attempts discard the old partial', a
     assert.equal(new Headers(options?.headers).has('Range'), false); return new Response(next.content);
   })(input, init)) as typeof globalThis.fetch;
   const update = await state.controller(true, { fetch }); await update.start(); await update.settled();
-  assert.equal((await update.status(false)).target, '1.7.0'); assert.deepEqual(await readFile(state.files.candidate), next.content);
+  assert.equal((await update.status(false)).target, LATER); assert.deepEqual(await readFile(state.files.candidate), next.content);
 });
 
 test('job lock is automatically released when a process crashes', async (context) => {
@@ -325,7 +330,7 @@ test('restart with a queued helper reports interruption but preserves its safe h
   const next = await state.controller(true, { taskExists: async () => true });
   assert.equal((await next.status(false)).error, 'interrupted');
   assert.equal((await readJson<UpdateRecord>(state.files.state))?.phase, 'prepared');
-  await applyUpdate(state.paths, { platform: 'win32', version: '1.6.0', executable: state.files.candidate, key: keys.publicKey, administrator: async () => {}, service: async () => '', swap: rename, health: async () => true, removeTask: async () => {} });
+  await applyUpdate(state.paths, { platform: 'win32', version: TARGET, executable: state.files.candidate, key: keys.publicKey, administrator: async () => {}, service: async () => '', swap: rename, health: async () => true, removeTask: async () => {} });
   assert.equal((await readJson<UpdateRecord>(state.files.state))?.state, 'idle');
 });
 
@@ -400,9 +405,9 @@ test('release signer uses generated keys and rejects wrong pinned key before wri
   const state = await fixture(context); await writeFile(path.join(state.directory, UPDATE_ASSET), payload);
   const { signRelease } = await import('../scripts/sign-release.mjs');
   const privateKey = keys.privateKey.export({ type: 'pkcs8', format: 'pem' }).toString();
-  await assert.rejects(signRelease({ directory: state.directory, version: '1.6.0', privateKey }));
+  await assert.rejects(signRelease({ directory: state.directory, version: TARGET, privateKey }));
   await assert.rejects(stat(path.join(state.directory, 'update-manifest.json')));
-  await signRelease({ directory: state.directory, version: '1.6.0', privateKey, publicKey: keys.publicKey });
+  await signRelease({ directory: state.directory, version: TARGET, privateKey, publicKey: keys.publicKey });
   const bytes = await readFile(path.join(state.directory, 'update-manifest.json')); const signature = await readFile(path.join(state.directory, 'update-manifest.json.sig'), 'utf8');
   const manifest = signedManifest(bytes, signature, keys.publicKey);
   await verifyUpdateFile(path.join(state.directory, UPDATE_ASSET), manifest);
