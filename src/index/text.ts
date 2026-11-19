@@ -17,11 +17,14 @@ export function tokens(text: string): string[] {
 
 const MAX_QUERY_WORDS = 40;
 
+// Commas and semicolons separate listed words, except inside a number such as 4,5.
+const SEPARATORS = /\s+|(?<!\p{N})[,;]|[,;](?!\p{N})/u;
+
 /** The query's words as typed: those joined by punctuation (ЛП-0419, 4.2) stay one term. */
 function queryTerms(query: string): string[][] {
   const terms: string[][] = [];
   let room = MAX_QUERY_WORDS;
-  for (const piece of query.split(/\s+/u)) {
+  for (const piece of query.split(SEPARATORS)) {
     const words = tokens(piece).slice(0, room);
     if (!words.length) continue;
     terms.push(words);
@@ -31,12 +34,18 @@ function queryTerms(query: string): string[][] {
   return terms;
 }
 
-/** All terms must match, a joined term as a phrase; `OR` is the fallback and takes every word on its own. */
-export function buildQuery(query: string, mode: 'AND' | 'OR' = 'AND'): string | null {
+/**
+ * The passes a search tries in turn. `PHRASE` needs every term, a joined one as written, and is skipped when the
+ * query has no joined term; `AND` needs every word in any order; `OR` is the last resort and needs any word.
+ */
+export type QueryMode = 'PHRASE' | 'AND' | 'OR';
+
+export function buildQuery(query: string, mode: QueryMode = 'AND'): string | null {
   const terms = queryTerms(query);
-  const parts = mode === 'AND' ? terms.map((term) => term.join(' ')) : terms.flat();
+  if (mode === 'PHRASE' && !terms.some((term) => term.length > 1)) return null;
+  const parts = mode === 'PHRASE' ? terms.map((term) => term.join(' ')) : terms.flat();
   if (!parts.length) return null;
-  return parts.map((part, index) => `"${part.replace(/"/gu, '""')}"${index === parts.length - 1 ? '*' : ''}`).join(` ${mode} `);
+  return parts.map((part, index) => `"${part.replace(/"/gu, '""')}"${index === parts.length - 1 ? '*' : ''}`).join(mode === 'OR' ? ' OR ' : ' AND ');
 }
 
 export function chunkParts(parts: Part[], target = 1500): Chunk[] {
@@ -60,7 +69,8 @@ export function chunkParts(parts: Part[], target = 1500): Chunk[] {
   return chunks;
 }
 
-function* renderedChunks<Item extends Pick<Chunk, 'label' | 'text'>>(chunks: Iterable<Item>): Generator<{ chunk: Item; head: string; start: number }> {
+/** Each chunk with where its text starts in the rendered text, in the UTF-16 units read_document counts. */
+export function* renderedChunks<Item extends Pick<Chunk, 'label' | 'text'>>(chunks: Iterable<Item>): Generator<{ chunk: Item; head: string; start: number }> {
   let label: string | undefined;
   let length = 0;
   for (const chunk of chunks) {
@@ -81,17 +91,8 @@ export function renderChunks(chunks: Pick<Chunk, 'label' | 'text'>[]): string {
   return result;
 }
 
-/** Where the wanted chunks start in the rendered text, in the UTF-16 units read_document counts. */
-export function chunkStarts(chunks: Iterable<Chunk>, wanted: ReadonlySet<number>): Map<number, number> {
-  const starts = new Map<number, number>();
-  for (const { chunk, start } of renderedChunks(chunks)) {
-    if (wanted.has(chunk.seq)) starts.set(chunk.seq, start);
-    if (starts.size === wanted.size) break;
-  }
-  return starts;
-}
-
-export function excerpt(text: string, query: string): string {
+/** A fragment around the query's best match, and where in `text` the fragment starts. */
+export function excerpt(text: string, query: string): { text: string; start: number } {
   const terms = queryTerms(query);
   const words = terms.flat();
   const found = [...text.matchAll(/[\p{L}\p{N}]+/gu)].map((match) => ({ stem: stemWord(match[0]), index: match.index }));
@@ -101,7 +102,9 @@ export function excerpt(text: string, query: string): string {
   const phrase = found.find((_, at) => terms.some((term, index) => term.length > 1 && phraseAt(term, index === terms.length - 1, at)));
   const word = phrase ?? found.find(({ stem }) => words.some((item, index) => fits(stem, item, index === words.length - 1)));
   const position = word?.index ?? 0;
-  const start = Math.max(0, position - 100);
+  let start = Math.max(0, position - 100);
+  // Never between the halves of a surrogate pair: the start is also an offset to read from.
+  if (/[\uDC00-\uDFFF]/u.test(text[start] ?? '')) start--;
   const end = Math.min(text.length, start + 300);
-  return `${start ? '…' : ''}${text.slice(start, end).replace(/\s+/gu, ' ')}${end < text.length ? '…' : ''}`;
+  return { text: `${start ? '…' : ''}${text.slice(start, end).replace(/\s+/gu, ' ')}${end < text.length ? '…' : ''}`, start };
 }

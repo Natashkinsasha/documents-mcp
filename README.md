@@ -105,7 +105,7 @@ Retrieve the saved values later with `sudo documents-mcp token`, or `documents-m
 
 | Tool | Purpose |
 | --- | --- |
-| `search_documents` | Stemmed Russian/English search, optional folder, ranked documents and excerpts with the `read_document` offset of each. Words joined by punctuation (`ЛП-0419`) match as a phrase first. A file changed since indexing is left out, counted in the answer and reindexed at once unless indexing is paused |
+| `search_documents` | Stemmed Russian/English search, optional folder, ranked documents and excerpts with the `read_document` offset where each excerpt starts. Words joined by punctuation (`ЛП-0419`) match as a phrase first, then all words in any order, then any word. A file changed since indexing is left out, counted in the answer and picked up by a pass started at once unless indexing is paused |
 | `list_folder` | Visible files and folders, readability and indexing status |
 | `read_document` | Text with page/sheet labels and character-offset paging |
 | `documents_status` | Index progress, partial documents and failures, counted from the index without checking each file; changes on disk appear after the next pass |
