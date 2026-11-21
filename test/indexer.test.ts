@@ -114,3 +114,40 @@ test('an empty file is reported as empty, not as a damaged document', async (con
   assert.doesNotMatch(resultText(await app.tools.call('documents_status', {})), /Устав\.doc/u);
   assert.match(resultText(await app.tools.call('read_document', { path: 'Устав.doc' })), /Файл пустой/u);
 });
+
+test('a write does not wait for a background scan that is indexing another file', async (context) => {
+  const fixture = await tempProject('write-during-scan');
+  const app = await createApp(fixture.config, { logger: () => {} });
+  let release!: () => void;
+  let released = false;
+  const releasedPromise = new Promise<void>((resolve) => { release = () => { released = true; resolve(); }; });
+  context.after(async () => { release(); await app.close(); await rm(fixture.directory, { recursive: true, force: true }); });
+  await writeFile(path.join(fixture.docs, 'slow.png'), 'scan');
+  const extractor = (app.indexer as unknown as { extractor: { extract: (file: string, options?: { yielding?: () => boolean }) => Promise<unknown> } }).extractor;
+  const original = extractor.extract.bind(extractor);
+  let started!: () => void;
+  const began = new Promise<void>((resolve) => { started = resolve; });
+  extractor.extract = async (file, options) => {
+    if (path.basename(file) === 'slow.png' && !released) {
+      started();
+      while (!released) {
+        if (options?.yielding?.()) return { parts: [], partial: true, yielded: true };
+        await Promise.race([releasedPromise, new Promise((resolve) => setTimeout(resolve, 5))]);
+      }
+      return { parts: [{ label: '', text: 'Медленный документ обхода.' }], partial: false };
+    }
+    return original(file, options);
+  };
+  const deadline = <T>(promise: Promise<T>): Promise<T> => Promise.race([promise,
+    new Promise<T>((_, reject) => setTimeout(() => reject(new Error('the write waited for the background scan')), 5000))]);
+  const scan = app.indexer.rescan();
+  await deadline(began);
+  const folder = await deadline(app.tools.call('create_folder', { path: 'Во время обхода' }));
+  assert.ok(!folder.isError, resultText(folder));
+  const written = await deadline(app.tools.call('write_document', { path: 'during-scan.txt', content: 'Новейший дефектоскоп' }));
+  assert.ok(!written.isError, resultText(written));
+  release();
+  await scan;
+  assert.equal(app.store.get('slow.png')?.status, 'ok', app.store.get('slow.png')?.error ?? '');
+  assert.match(resultText(await app.tools.call('search_documents', { query: 'дефектоскоп' })), /during-scan\.txt/u);
+});
