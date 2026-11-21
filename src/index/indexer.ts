@@ -71,19 +71,19 @@ export class Indexer {
   }
 
   async refresh(paths: string[]): Promise<void> {
-    await this.settle();
+    await this.settle(paths);
     for (const relative of paths) {
       for (const row of this.store.all()) if (row.path === relative || row.path.startsWith(`${relative}/`)) this.store.remove(row.path);
       for (const file of this.discovered) if (file === relative || file.startsWith(`${relative}/`)) this.discovered.delete(file);
       let target;
       try { target = await this.guard.resolve(relative); } catch { continue; }
-      if (target.info.isFile()) await this.ensure(relative);
-      else if (target.info.isDirectory()) for await (const file of this.guard.walk(relative)) await this.ensure(file);
+      if (target.info.isFile()) await this.ensure(relative, { urgent: true });
+      else if (target.info.isDirectory()) for await (const file of this.guard.walk(relative)) await this.ensure(file, { urgent: true });
     }
   }
 
   async relocate(from: string, to: string): Promise<void> {
-    await this.settle();
+    await this.settle([from, to]);
     const documents = this.store.all().filter((row) => row.path === from || row.path.startsWith(`${from}/`)).map((row) => ({ row, chunks: this.store.chunks(row.path) }));
     for (const relative of [from, to]) {
       for (const row of this.store.all()) if (row.path === relative || row.path.startsWith(`${relative}/`)) this.store.remove(row.path);
@@ -96,8 +96,8 @@ export class Indexer {
       if (current.info.size === row.size && current.info.mtimeMs === row.mtime_ms) this.store.put(destination, row.size, row.mtime_ms, row.status, row.error, chunks);
     }
     const target = await this.guard.resolve(to);
-    if (target.info.isFile()) await this.ensure(to);
-    else for await (const file of this.guard.walk(to)) await this.ensure(file);
+    if (target.info.isFile()) await this.ensure(to, { urgent: true });
+    else for await (const file of this.guard.walk(to)) await this.ensure(file, { urgent: true });
   }
 
   start(): void {
@@ -111,7 +111,7 @@ export class Indexer {
     if (this.stopped) return Promise.resolve();
     this.scanning = true;
     this.scanFailed = false;
-    this.scanPromise = this.exclusive(() => this.scan()).catch(() => {
+    this.scanPromise = this.scan().catch(() => {
       this.scanFailed = true;
       this.logger({ level: 'warn', message: 'Обход документов не завершён; существующий индекс сохранён.' });
     }).finally(() => {
@@ -122,6 +122,25 @@ export class Indexer {
     return this.scanPromise;
   }
 
+  /**
+   * Applies the walk's snapshot after the fact. A path missing from it but still on disk was written while
+   * the walk ran: its freshly indexed row stays. Only a path that is really gone leaves the index.
+   */
+  private async applyPresence(present: Set<string>): Promise<void> {
+    for (const row of this.store.all()) {
+      if (present.has(row.path)) continue;
+      try { await this.guard.resolve(row.path); }
+      catch { this.store.remove(row.path); this.discovered.delete(row.path); }
+    }
+    for (const file of [...this.discovered]) {
+      if (present.has(file)) continue;
+      try { await this.guard.resolve(file); }
+      catch { this.discovered.delete(file); }
+    }
+    for (const file of present) this.discovered.add(file);
+    for (const row of this.store.all()) this.discovered.add(row.path);
+  }
+
   private async scan(): Promise<void> {
     if (!this.config.readOnly) await this.trash.purge();
     const present = new Set<string>();
@@ -130,9 +149,9 @@ export class Indexer {
       present.add(file);
       await yieldNow();
     }
-    this.discovered.clear();
-    for (const file of present) this.discovered.add(file);
-    for (const row of this.store.all()) if (!present.has(row.path)) this.store.remove(row.path);
+    // The walk runs outside the write lock, so a file written while it was running must keep the row
+    // the write already indexed. Only paths that are really gone leave the index.
+    await this.exclusive(() => this.applyPresence(present));
     // Pauses limit only this background pass: ensure() still serves any file an agent asks for.
     if (this.paused) return;
     // Text first: images and scanned PDF pages need recognition, which is far slower, so they wait for a second pass.
@@ -253,8 +272,14 @@ export class Indexer {
     });
   }
 
-  /** Lets the work in progress end, soonest possible, before a change to the files is applied. */
-  private async settle(): Promise<void> {
+  /**
+   * Lets the work in progress end, soonest possible, before a change to the files is applied.
+   * A job for another file is not waited for: a background pass indexes the whole folder, and a write
+   * to one document must not queue behind it.
+   */
+  private async settle(paths?: string[]): Promise<void> {
+    const running = this.running;
+    if (paths && running && !paths.some((target) => running.file === target || running.file.startsWith(`${target}/`))) return;
     this.yieldRunning();
     await this.runningWork;
   }
